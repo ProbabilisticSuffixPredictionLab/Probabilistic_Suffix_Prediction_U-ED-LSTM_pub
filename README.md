@@ -83,5 +83,6 @@ The ``evaluation_metric_notebooks`` use multiprocessing to load the suffix sampl
 By default, the plots are created as PGF files for LaTeX, requiring that you have a LaTeX distribution installed.
 
 ### Contact:
-Michel Kunkler: michel.kunkler@tum.de
-Henryk Mustroph: henryk.mustroph@tum.de
+- Michel Kunkler: michel.kunkler@tum.de
+
+- Henryk Mustroph: henryk.mustroph@tum.de
