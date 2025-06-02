@@ -1,10 +1,22 @@
 # Probabilistic Suffix Prediction of Business Processes
 
+This is the Repository for the paper: 'Probabilistic Suffix Prediction of Business Processes' and the technical report: 'An Uncertainty-Aware ED-LSTM for Probabilistic Suffix Prediction'.
+
 ## Probabilistic Suffix Prediction Framework
 We predict a probability distribution of suffixes of business processes using our own U-ED-LSTM and MC Suffix Sampling Algorithm.
 
 ![Example Image](./img/example.png)
 
+## U-ED-LSTM Architecture
+
+The figure above illustrates our U-ED-LSTM architecture and training pipeline. Both the encoder and decoder comprise two-layered LSTMs with stochastic LSTM cells, applying dropout as a Bayesian approximation. The decoder includes multiple output layer stacks, with each output layer containing two neurons—one for predicting the mean and the other for predicting the variance—both learned through loss attenuation.
+
+![Exemplary U-ED-LSTM model and training pipeline](./img/U-ED-LSTM-Architecture.png)
+
+## MC Suffix Sampling Algorithm
+The MC Suffix Sampling Algorithm approximates a posterior distribution of suffixes by conducting T Monte Carlo (MC) trials. In each trial, a suffix is sampled from the mean and variance (probability distribution) predictions of the U-ED-LSTM. The result is a set of T suffix samples, which can be aggregated to calculate a mean and variance, indicating the total uncertainty of all U-ED-LSTM suffix predictions.
+
+![MC Suffxi Sampling Algorithm](./img/MC-Suffix-Sampling-Algorithm.png)
 
 ## Setting Up the Python Environment with Pipenv
 
@@ -69,3 +81,7 @@ The ``save_every`` variable saves the samples for every n-th prefix. We use pick
 
 The ``evaluation_metric_notebooks`` use multiprocessing to load the suffix sample pickle files. Again, this can take massive amounts of RAM. Consider decreasing the ``num_workers`` variable when your RAM is limited.
 By default, the plots are created as PGF files for LaTeX, requiring that you have a LaTeX distribution installed.
+
+### Contact:
+Michel Kunkler: michel.kunkler@tum.de
+Henryk Mustroph: henryk.mustroph@tum.de
