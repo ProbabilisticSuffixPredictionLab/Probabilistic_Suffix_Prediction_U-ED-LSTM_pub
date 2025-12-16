@@ -32,11 +32,13 @@ class DropoutUncertaintyLSTMDecoder(nn.Module):
         super(DropoutUncertaintyLSTMDecoder, self).__init__()
         
         self.embeddings = embeddings
-        
+
         self.data_indices_dec = data_indices_dec
 
+        self.input_proj = nn.Linear(input_size, hidden_size)
+
         # Create a first cell:
-        self.first_layer = DropoutUncertaintyLSTMCell(input_size=input_size, hidden_size=hidden_size, dropout=dropout)
+        self.first_layer = DropoutUncertaintyLSTMCell(input_size=hidden_size, hidden_size=hidden_size, dropout=dropout)
         
         # Create multiple LSTM cells based on num_layer
         self.hidden_layers = nn.ModuleList([DropoutUncertaintyLSTMCell(input_size=hidden_size, hidden_size=hidden_size, dropout=dropout) for i in range(num_layers-1)])
@@ -73,6 +75,12 @@ class DropoutUncertaintyLSTMDecoder(nn.Module):
             
             total_weight_reg += weight
             total_bias_reg += bias
+
+        # Projection layer (weaker prior)
+        proj_weight_reg = 0.1 * torch.sum(self.input_proj.weight ** 2)
+        proj_bias_reg = 0.1 * torch.sum(self.input_proj.bias ** 2)
+        total_weight_reg += proj_weight_reg
+        total_bias_reg += proj_bias_reg
             
         return total_weight_reg, total_bias_reg
     
@@ -136,11 +144,13 @@ class DropoutUncertaintyLSTMDecoder(nn.Module):
         # Process the input event through the encoder
         event = self.__data_enc_for_model(data=input, pred=pred)  # dim: Tensor: seq_len x batch_size x input feature
 
+        input_proj = self.input_proj(event)
+
         # first decoder call initialize sample mask
         if z is None:
             z_hidden_layers = []
             # Pass input_event through the first LSTM layer and all hidden layers
-            outputs, (h, c), z_first_layer = self.first_layer(input=event, hx=hx, z=None)
+            outputs, (h, c), z_first_layer = self.first_layer(input=input_proj, hx=hx, z=None)
             
             for i, lstm_cell in enumerate(self.hidden_layers):
                 outputs, (h, c), z_hidden_layer = lstm_cell(input=outputs, hx=(h, c), z=None)  
@@ -150,7 +160,7 @@ class DropoutUncertaintyLSTMDecoder(nn.Module):
         # Use same sample masks from previous iterations for decoder
         else:
             # Pass input_event through the first LSTM layer and all hidden layers
-            outputs, (h, c), _ = self.first_layer(input=event, hx=hx, z=z[0])
+            outputs, (h, c), _ = self.first_layer(input=input_proj, hx=hx, z=z[0])
             
             for i, lstm_cell in enumerate(self.hidden_layers):
                 outputs, (h, c), _ = lstm_cell(input=outputs, hx=(h, c), z=z[1][i])

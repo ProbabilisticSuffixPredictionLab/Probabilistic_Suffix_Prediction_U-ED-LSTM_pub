@@ -12,7 +12,7 @@ class Loss:
     def __init__(self):
         pass
         
-    def standard_mse(self, preds, targets):
+    def standard_mse(self, preds, targets, eos_paddings):
         """
         Standard MSE loss.
         
@@ -30,14 +30,20 @@ class Loss:
         
         # Loss value
         L = torch.sum((targets - preds) ** 2, dim=2)
-        # Mean over events in sequence
-        L = torch.mean(L, dim=1)
+
+        # apply EOS padding mask
+        L = L * eos_paddings
+
+        # Normalize by number of valid tokens per batch
+        valid_tokens = eos_paddings.sum(dim=1)  # [batch]
+        L = L.sum(dim=1) / (valid_tokens + 1e-8)
+
         # Mean over batches
         L = torch.mean(L)
         
         return L
         
-    def loss_attenuation_mse(self, pred_means, pred_logvars, targets):
+    def loss_attenuation_mse(self, pred_means, pred_logvars, targets, eos_paddings):
         """
         Loss attenuation MSE: Combined Epistemic and Aleatoric Uncertainty.
     
@@ -64,14 +70,20 @@ class Loss:
         inv_variances = torch.exp(-pred_logvars)
         
         L = torch.sum(0.5 * (inv_variances * ((targets - pred_means) ** 2) + pred_logvars), dim=2)
-        # Mean over events in sequence
-        L = torch.mean(L, dim=1)
+
+        # apply EOS padding mask
+        L = L * eos_paddings
+
+        # Normalize by number of valid tokens per batch
+        valid_tokens = eos_paddings.sum(dim=1)  # [batch]
+        L = L.sum(dim=1) / (valid_tokens + 1e-8)
+
         # Mean over batches
         L = torch.mean(L)
 
         return L
     
-    def loss_attenuation_mse_log_normal(self, pred_means, pred_logvars, log_targets):
+    def loss_attenuation_mse_log_normal(self, pred_means, pred_logvars, log_targets, eos_paddings):
         """
         Loss attenuation MSE: Combined Epistemic and Aleatoric Uncertainty of an assumed Log normal probability density function for our time input.
     
@@ -100,15 +112,20 @@ class Loss:
         log_targets = log_targets.unsqueeze(2)
         
         L = torch.sum(log_targets + 0.5 * (pred_logvars + (inv_variances * (log_targets - pred_means)**2)), dim=2)
-                
-        # Mean over events in sequence
-        L = torch.mean(L, dim=1)
+        
+        # apply EOS padding mask
+        L = L * eos_paddings
+
+        # Normalize by number of valid tokens per batch
+        valid_tokens = eos_paddings.sum(dim=1)  # [batch]
+        L = L.sum(dim=1) / (valid_tokens + 1e-8)
+
         # Mean over batches
         L = torch.mean(L)
 
         return L
     
-    def standard_cross_entropy(self, pred_logits, targets):
+    def standard_cross_entropy(self, pred_logits, targets, eos_paddings):
         """
         Standard Cross Entropy loss.
       
@@ -127,14 +144,20 @@ class Loss:
         pred_logits = pred_logits.permute(1,2,0)
         
         L = CEL(input=pred_logits, target=targets)
-        # Mean over events in sequences
-        L = torch.mean(L, dim=1)
+
+        # apply EOS padding mask
+        L = L * eos_paddings
+
+        # Normalize by number of valid tokens per batch
+        valid_tokens = eos_paddings.sum(dim=1)  # [batch]
+        L = L.sum(dim=1) / (valid_tokens + 1e-8)
+
         # Mean over batches
         L = torch.mean(L) 
         
         return L
     
-    def loss_attenuation_cross_entropy(self, pred_logits, pred_logvars, T, targets):
+    def loss_attenuation_cross_entropy(self, pred_logits, pred_logvars, T, targets, eos_paddings):
         """
         Loss attenuation cross entropy: Combined Epistemic and Aleatoric Uncertainty.
           
@@ -171,8 +194,14 @@ class Loss:
             L += ce_loss
                
         L = (1/T) * L
-        # Mean over events in sequence
-        L = torch.mean(L, dim=1)
+
+        # apply EOS padding mask
+        L = L * eos_paddings
+
+        # Normalize by number of valid tokens per batch
+        valid_tokens = eos_paddings.sum(dim=1)  # [batch]
+        L = L.sum(dim=1) / (valid_tokens + 1e-8)
+
         # Mean over batches
         L = torch.mean(L)
           

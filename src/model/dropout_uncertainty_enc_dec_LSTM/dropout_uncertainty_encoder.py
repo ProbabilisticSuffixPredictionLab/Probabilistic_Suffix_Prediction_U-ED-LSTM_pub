@@ -34,9 +34,11 @@ class DropoutUncertaintyLSTMEncoder(nn.Module):
         
         # List of two lists (categorical, numerical) each containing the indices of tensors required for encoder
         self.data_indices_enc = data_indices_enc
+
+        self.input_proj = nn.Linear(input_size, hidden_size)
         
         # Create a first cell:
-        self.first_layer = DropoutUncertaintyLSTMCell(input_size=input_size, hidden_size=hidden_size, dropout=dropout)
+        self.first_layer = DropoutUncertaintyLSTMCell(input_size=hidden_size, hidden_size=hidden_size, dropout=dropout)
         # Create multiple LSTM cells based on num_layer
         self.hidden_layers = nn.ModuleList([DropoutUncertaintyLSTMCell(input_size=hidden_size, hidden_size=hidden_size, dropout=dropout) for i in range(num_layers-1)])
 
@@ -54,6 +56,12 @@ class DropoutUncertaintyLSTMEncoder(nn.Module):
             weight, bias = l.regularizer()
             total_weight_reg += weight
             total_bias_reg += bias
+
+        # Projection layer (weaker prior)
+        proj_weight_reg = 0.1 * torch.sum(self.input_proj.weight ** 2)
+        proj_bias_reg = 0.1 * torch.sum(self.input_proj.bias ** 2)
+        total_weight_reg += proj_weight_reg
+        total_bias_reg += proj_bias_reg
             
         return total_weight_reg, total_bias_reg
         
@@ -70,9 +78,12 @@ class DropoutUncertaintyLSTMEncoder(nn.Module):
         
         # Transform the input into 
         prefixes = self.__data_enc_for_model(data=input) # dim: Tensor: seq_len x batch_size x input feature (cat as embedding) 
+
+        # Project input features to hidden size
+        input_proj = self.input_proj(prefixes)
         
         # Outputs: All hidden states of all cells in the layer, h,c: last hidden state and cell state in the layer
-        outputs, (h, c), _ = self.first_layer(input=prefixes, hx=None, z=None)
+        outputs, (h, c), _ = self.first_layer(input=input_proj, hx=None, z=None)
         
         # Pass through the remaining LSTM cell: Layer gets for: input: h_n Tensor, hx: (h, c)
         for _, layer in enumerate(self.hidden_layers):

@@ -82,7 +82,7 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         print("Total numerical feature size encoder: ", num_size_enc)
         
         self.input_size_enc = embedding_size_enc + num_size_enc 
-        print("Input feature size encoder: ", self.input_size_enc)       
+        print("Input feature size encoder: ", self.input_size_enc)
         
         # Define Encoder
         self.encoder = DropoutUncertaintyLSTMEncoder(input_size=self.input_size_enc,
