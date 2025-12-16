@@ -89,9 +89,9 @@ class Trainer:
         print("Shuffle batched dataset: ", self.shuffle)
         
         # Teacher forcing
-        self.teacher_forcing_ratio = optimize_values["teacher_forcing_ratio"]
-        print("Teacher forcing ratio: ", self.teacher_forcing_ratio)
-        self.teacher_forcing_init = float(self.teacher_forcing_ratio)  # e.g. 1.0
+        self.min_teacher_forcing_ratio = optimize_values["min_teacher_forcing_ratio"]
+        print("Min. Teacher forcing ratio: ", self.min_teacher_forcing_ratio)
+        self.teacher_forcing_ratio = float(1.0)  # e.g. 1.0
         
         # Events in sufffix: Dependent on data set
         self.suffix_data_split_value = suffix_data_split_value
@@ -143,7 +143,7 @@ class Trainer:
         val_attenuated_losses = []
 
         # Validation dataloader
-        val_dataloader = DataLoader(dataset=self.data_val, batch_size=self.mini_batches, shuffle=self.shuffle, num_workers=4, pin_memory=True)
+        val_dataloader = DataLoader(dataset=self.data_val, batch_size=self.mini_batches, shuffle=self.shuffle, num_workers=0, pin_memory=True)
         
         # Teacher forcing reducing index:
         k = 1
@@ -153,10 +153,10 @@ class Trainer:
         scale = 0.1 * self.epochs             # default: transition width (10% of total epochs)
         
         # Trainings/ Epoch Loop
-        for epoch in tqdm(range(self.epochs)):
+        for epoch in range(self.epochs):#tqdm(range(self.epochs)):
             
             # Train dataloader
-            train_dataloader = DataLoader(dataset=self.data_train, batch_size=self.mini_batches, shuffle=self.shuffle, num_workers=4, pin_memory=True)
+            train_dataloader = DataLoader(dataset=self.data_train, batch_size=self.mini_batches, shuffle=self.shuffle, num_workers=0, pin_memory=True)
             
             epoch_cat_loss = {}
             epoch_num_loss = {}
@@ -165,12 +165,7 @@ class Trainer:
             num_batches_per_epoch = 0.0
             
             # Reduce Teacher forcing ratio dynamically:
-            if epoch >= ((self.epochs * k) / 5):
-                # adopt to reduce teacher forcing more drastical:
-                self.teacher_forcing_ratio = self.teacher_forcing_ratio - (self.teacher_forcing_ratio / 10)
-                if self.teacher_forcing_ratio < 0:
-                    self.teacher_forcing_ratio = 0.0
-                k +=1
+            self.teacher_forcing_ratio = max(self.min_teacher_forcing_ratio, 1 - epoch / (self.epochs * 0.5))
 
             # Sigmoid decreasing schedule
             # Starts near 1, smoothly decays to near 0
@@ -178,7 +173,7 @@ class Trainer:
 
             # Bacth Loop
             for i, train_data in enumerate(train_dataloader): 
-                cats, nums, _ = train_data
+                cats, nums, eos_paddings, _ = train_data
                             
                 # Automize this            
                 
@@ -191,17 +186,19 @@ class Trainer:
                 suffixes_cat = [cat[:, -self.suffix_data_split_value:].to(self.device) for cat in cats]
                 suffixes_num = [num[:, -self.suffix_data_split_value:].to(self.device) for num in nums]
                 suffixes = [suffixes_cat, suffixes_num]
+
+                eos_paddings_suffix = eos_paddings[:, -self.suffix_data_split_value:].to(self.device)
                 
                 # GradNorm Training:
                 if self.use_gradnorm:
                     # all_losses: list of two dicts, categorical dict and numerical dict: key: feature name, value: tensor loss
                     # loss: Tensor of total loss
-                    all_losses_dict, loss_value = self.train_epoch_gradnorm(prefixes=prefixes, suffixes=suffixes)
+                    all_losses_dict, loss_value = self.train_epoch_gradnorm(prefixes=prefixes, suffixes=suffixes, eos_paddings=eos_paddings_suffix)
                     cat_losses_dict, num_losses_dict = all_losses_dict
                      
                 # Standard Training:    
                 else:
-                    all_losses_dict, loss_value = self.train_epoch(prefixes=prefixes, suffixes=suffixes)
+                    all_losses_dict, loss_value = self.train_epoch(prefixes=prefixes, suffixes=suffixes, eos_paddings=eos_paddings_suffix)
                     cat_losses_dict, num_losses_dict = all_losses_dict
                 
                 # Accumulate the categorical losses
@@ -259,7 +256,7 @@ class Trainer:
             # Tensorboard writer:
             # Hyperparameters
             self.writer.add_scalars(
-                "Hyperparameter:", 
+                "Hyperparameter", 
                 {
                     'Learning Rate': current_lr,
                     'Teacher Forcing Ratio': self.teacher_forcing_ratio
@@ -278,26 +275,26 @@ class Trainer:
             
             # Categorical losses
             for feature_name in epoch_cat_loss.keys():
+                safe_feature_name = feature_name.replace(':', '_').replace('/', '_')
                 self.writer.add_scalars(
                     "Categorical Feature Losses",
                     {
-                        f'Training {feature_name}': epoch_cat_loss[feature_name],
-                        f'Standard Validation {feature_name}': epoch_cat_loss_val_std[feature_name],
-                        f'Uncertainty Validation {feature_name}': epoch_cat_loss_val_unc[feature_name]
+                        f'Training {safe_feature_name}': epoch_cat_loss[feature_name],
+                        f'Standard Validation {safe_feature_name}': epoch_cat_loss_val_std[feature_name],
+                        f'Uncertainty Validation {safe_feature_name}': epoch_cat_loss_val_unc[feature_name]
                     },
                     epoch + 1)
-                  
             # Numerical losses
             for feature_name in epoch_num_loss.keys():
+                safe_feature_name = feature_name.replace(':', '_').replace('/', '_')
                 self.writer.add_scalars(
                     "Numerical Feature Losses",
                     {
-                        f'Training {feature_name}': epoch_num_loss[feature_name],
-                        f'Standard Validation {feature_name}': epoch_num_loss_val_std[feature_name],
-                        f'Uncertainty Validation {feature_name}': epoch_num_loss_val_unc[feature_name]
+                        f'Training {safe_feature_name}': epoch_num_loss[feature_name],
+                        f'Standard Validation {safe_feature_name}': epoch_num_loss_val_std[feature_name],
+                        f'Uncertainty Validation {safe_feature_name}': epoch_num_loss_val_unc[feature_name]
                     },
                     epoch + 1)
-                
             # GradNorm
             if self.use_gradnorm:
                 # Convert the GradNorm weights and gradient norms to numpy arrays
@@ -305,10 +302,11 @@ class Trainer:
                 
                 feature_losses = list(epoch_cat_loss.keys()) + list(epoch_num_loss.keys())
                 for i, feature_name in enumerate(feature_losses):
+                    safe_feature_name = feature_name.replace(':', '_').replace('/', '_')
                     self.writer.add_scalars(
                         "Gradnorm values", 
                         {
-                            f'Gradnorm Weight {feature_name}': write_weights[i]
+                            f'Gradnorm Weight {safe_feature_name}': write_weights[i]
                         },
                         epoch+1)
             
@@ -329,7 +327,7 @@ class Trainer:
 
         return train_attenuated_losses, val_losses, val_attenuated_losses
     
-    def train_epoch(self, prefixes, suffixes):
+    def train_epoch(self, prefixes, suffixes, eos_paddings):
         """
         Train the model on batches.
 
@@ -377,7 +375,8 @@ class Trainer:
                 var_cat_pred = predictions_cat.get(f'{feature_name}_var') # dim: seq len x batch size x number classes
                 target_cat = cat_suffixes_dict[feature_name] # dim: batch size x seq len
                 # Loss caluclation
-                loss_cat = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred, pred_logvars=var_cat_pred, T=30, targets=target_cat.long())
+                loss_cat = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred, pred_logvars=var_cat_pred, T=30, targets=target_cat.long(),
+                                                                        eos_paddings=eos_paddings)
                 
                 if (feature_name in cat_loss_dict):
                     raise ValueError("Feature is already in output dict")
@@ -400,7 +399,8 @@ class Trainer:
                 target_num = num_suffixes_dict[feature_name] # dim: batch size x seq len
 
                 # Normal loss:
-                loss_num = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred, pred_logvars=var_num_pred, targets=target_num)
+                loss_num = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred, pred_logvars=var_num_pred, targets=target_num,
+                                                              eos_paddings=eos_paddings)
                                 
                 if (feature_name in num_loss_dict):
                     raise ValueError("Feature is already in output dict")
@@ -433,7 +433,7 @@ class Trainer:
         
         return all_losses, loss
 
-    def train_epoch_gradnorm(self, prefixes, suffixes):
+    def train_epoch_gradnorm(self, prefixes, suffixes, eos_paddings):
         """
         Train the model on batches and weight MTL lossses using GradNorm.
 
@@ -477,7 +477,8 @@ class Trainer:
                 target_cat = cat_suffixes_dict[feature_name] # dim: batch size x seq len
 
                 # Loss caluclation
-                loss_cat = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred, pred_logvars=var_cat_pred, T=30, targets=target_cat.long())
+                loss_cat = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred, pred_logvars=var_cat_pred, T=30, targets=target_cat.long(),
+                                                                        eos_paddings=eos_paddings)
 
                 if (feature_name in cat_loss_dict):
                     raise ValueError("Feature is already in output dict")
@@ -500,7 +501,8 @@ class Trainer:
                 target_num = num_suffixes_dict[feature_name] # dim: batch size x seq len
 
                 # Normal loss:
-                loss_num = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred, pred_logvars=var_num_pred, targets=target_num)
+                loss_num = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred, pred_logvars=var_num_pred, targets=target_num,
+                                                              eos_paddings=eos_paddings)
                 # print("normal loss")
                                 
                 if (feature_name in num_loss_dict):
@@ -599,7 +601,7 @@ class Trainer:
             
             for _, val_data in enumerate(val_dataloader): 
                 
-                cats, nums, _ = val_data    
+                cats, nums, eos_paddings, _ = val_data    
                 
                 # dim: list(list(Tensors categorical: dim: batch size x window size-4), list(Tensors numerical: dim: batch size x window size-4))
                 prefixes_cat = [cat[:, :-self.suffix_data_split_value].to(self.device) for cat in cats]
@@ -609,6 +611,8 @@ class Trainer:
                 suffixes_cat = [cat[:, -self.suffix_data_split_value:].to(self.device) for cat in cats]
                 suffixes_num = [num[:, -self.suffix_data_split_value:].to(self.device) for num in nums]
                 suffixes = [suffixes_cat, suffixes_num]
+
+                eos_paddings_suffix = eos_paddings[:, -self.suffix_data_split_value:].to(self.device)
 
                 # Model predictions:
                 predictions, _, _, data_features_indeces_dec= self.model(prefixes=prefixes, suffixes=suffixes, teacher_forcing_ratio=self.teacher_forcing_ratio)
@@ -640,9 +644,11 @@ class Trainer:
 
                         # Loss caluclation
                         # Standard cross entropy
-                        cat_loss_std = self.loss_obj.standard_cross_entropy(pred_logits=mean_cat_pred, targets=target_cat.long())
+                        cat_loss_std = self.loss_obj.standard_cross_entropy(pred_logits=mean_cat_pred, targets=target_cat.long(),
+                                                                            eos_paddings=eos_paddings_suffix)
                         # Uncertainty cross entropy
-                        cat_loss_unc = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred, pred_logvars=var_cat_pred, T=30, targets=target_cat.long())
+                        cat_loss_unc = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred, pred_logvars=var_cat_pred, T=30, targets=target_cat.long(),
+                                                                                    eos_paddings=eos_paddings_suffix)
 
                         if feature_name in cat_loss_dict_std:
                             # Add the current batch's loss to the cumulative loss
@@ -665,9 +671,11 @@ class Trainer:
 
                         # Loss caluclation
                         # Standard mean squared error
-                        num_loss_std = self.loss_obj.standard_mse(preds=mean_num_pred, targets=target_num)
+                        num_loss_std = self.loss_obj.standard_mse(preds=mean_num_pred, targets=target_num,
+                                                                  eos_paddings=eos_paddings_suffix)
                         # Normal loss:
-                        num_loss_unc = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred, pred_logvars=var_num_pred, targets=target_num)
+                        num_loss_unc = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred, pred_logvars=var_num_pred, targets=target_num,
+                                                                          eos_paddings=eos_paddings_suffix)
                         
                         if feature_name in num_loss_dict_std:
                             # Add the current batch's loss to the cumulative loss
