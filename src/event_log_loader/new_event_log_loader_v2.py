@@ -10,40 +10,7 @@ from tqdm.notebook import tqdm
 from typing import Optional, Dict, Any
 from sklearn.base import BaseEstimator, TransformerMixin
 
-# standardization for log-normal             
-class PositiveStandardizer_normed(BaseEstimator, TransformerMixin):
-    """
-    Standard scaler for log normal attributes.
-    """
-    def __init__(self):
-        self.mean_ = None
-        self.std_ = None
-
-    def fit(self, X, y=None):
-        print("Positive Standardization")
-        log_x = np.log1p(X)
-        print("min,25%,50%,75%,max:", np.percentile(log_x, [0,25,50,75,100]))
-        # Standardize values
-        self.mean_ = np.mean(log_x, axis=0)
-        print("Mean: ", self.mean_)
-        self.std_ = np.std(log_x, axis=0)
-        print("Std: ", self.std_)
-        return self
-        
-    def transform(self, X):
-        # log the observations to assume normal PDF
-        log_x = np.log1p(X)
-        x_enc = (log_x - self.mean_) / self.std_ 
-        return x_enc
-    
-    def inverse_transform(self, X_enc):
-        # Destandardization
-        log_x = X_enc * self.std_ + self.mean_
-        # Exponentiation:
-        x = np.expm1(log_x)
-        return x
-    
-# Raw dataframe of whole event log: creates a dataframe with dynamic attributes as lists and static as value
+# raw dataframe of whole event log: creates a dataframe with dynamic attributes as lists and static as value
 class RawDataFrameLoader:
     def __init__(self,
                  event_log_dir : str,
@@ -85,9 +52,6 @@ class RawDataFrameLoader:
         self.static_continuous_columns = list(static_continuous_columns or [])
 
         self.df[self.timestamp_name] = pd.to_datetime(self.df[self.timestamp_name], format=date_format, errors='coerce')
-
-        # Preserve the raw event-level data
-        self.raw_df = self.create_case_level_dataframe(self.df.copy())
         
     @staticmethod
     def __extract_static_value(series: pd.Series) -> object:
@@ -122,6 +86,8 @@ class CSV2EventLog(RawDataFrameLoader):
     def __init__(self, *args, **kwargs):
         # load raw constructor
         super().__init__(*args, **kwargs)
+        
+        # Time values
         # create new time since case started column if desired
         if self.time_since_case_start_column:
             self.__create_time_since_case_start_column()
@@ -137,6 +103,9 @@ class CSV2EventLog(RawDataFrameLoader):
         # create new seconds in day column if desired
         if self.seconds_in_day_column:
             self.__create_seconds_in_day_column()
+            
+        # raw dataframe befor split containing categorical and continuous attributes
+        self.raw_df = self.create_case_level_dataframe(self.df.copy())
         
         # Add EOS to every case
         self.df = self.df.groupby(self.case_name, group_keys=False).apply(
@@ -200,7 +169,7 @@ class CSV2EventLog(RawDataFrameLoader):
         concat_case = pd.concat([group.sort_values(by=self.timestamp_name), eos_rows])
         return concat_case
 
-#    
+#  split dataframes 
 class EventLogSplitter:
     def __init__(self,
                  train_validation_size : float,
@@ -227,7 +196,7 @@ class EventLogSplitter:
 
         return train_df, train_validation_df, test_validation_df
 
-#
+# class that provides intermediate steps: create dataframe of prefixes for marking determination:
 class PrefixesDataFrameLoader:
     def __init__(self, event_log_location: str, event_log_properties: Dict[str, Any]):
         if not event_log_properties:
@@ -266,8 +235,9 @@ class PrefixesDataFrameLoader:
         self.test_df = self.processed_splits['test']
 
     def get_raw_dataframe(self) -> pd.DataFrame:
+        # return self.csv2event_log.raw_df.copy()
         return self.csv2event_log.raw_df.copy()
-
+        
     def _resolve_window_size(self) -> int:
         setting = self.window_size_setting if self.window_size_setting is not None else 'auto'
         if isinstance(setting, str) and setting.lower() == 'auto':
@@ -343,7 +313,40 @@ class PrefixesDataFrameLoader:
             df = self.transform(df=self.test_df)
         return df
 
-#
+# standardization for log-normal             
+class PositiveStandardizer_normed(BaseEstimator, TransformerMixin):
+    """
+    Standard scaler for log normal attributes.
+    """
+    def __init__(self):
+        self.mean_ = None
+        self.std_ = None
+
+    def fit(self, X, y=None):
+        print("Positive Standardization")
+        log_x = np.log1p(X)
+        print("min,25%,50%,75%,max:", np.percentile(log_x, [0,25,50,75,100]))
+        # Standardize values
+        self.mean_ = np.mean(log_x, axis=0)
+        print("Mean: ", self.mean_)
+        self.std_ = np.std(log_x, axis=0)
+        print("Std: ", self.std_)
+        return self
+        
+    def transform(self, X):
+        # log the observations to assume normal PDF
+        log_x = np.log1p(X)
+        x_enc = (log_x - self.mean_) / self.std_ 
+        return x_enc
+    
+    def inverse_transform(self, X_enc):
+        # Destandardization
+        log_x = X_enc * self.std_ + self.mean_
+        # Exponentiation:
+        x = np.expm1(log_x)
+        return x
+
+# responsible for tensor encoding of event log data
 class TensorEncoderDecoder:
     def __init__(self,
                  event_log : pd.DataFrame,
@@ -676,6 +679,7 @@ class TensorEncoderDecoder:
         standardizer = PositiveStandardizer_normed()
         return standardizer 
 
+# create event log
 class EventLogLoader:
     def __init__(self, event_log_location, event_log_properties, prefix_df: Optional[PrefixesDataFrameLoader]=None):
         if prefix_df:
@@ -704,13 +708,9 @@ class EventLogLoader:
         encoded_data, all_categories, all_static_categories = self.encoder_decoder.encode_df(df)
         return EventLogDataset(encoded_data, all_categories, all_static_categories, self.encoder_decoder)
 
+# return object: returns tensors and all further information
 class EventLogDataset(Dataset):
-    def __init__(self,
-                 tensor_bundle : dict[str, object],
-                 all_categories : tuple[list[tuple[str, int, dict[str, int]]]],
-                 all_static_categories : tuple[list[tuple[str, int, dict[str, int]]]],
-                 encoder_decoder : TensorEncoderDecoder):
-        
+    def __init__(self, tensor_bundle : dict[str, object], all_categories : tuple[list[tuple[str, int, dict[str, int]]]], all_static_categories : tuple[list[tuple[str, int, dict[str, int]]]], encoder_decoder : TensorEncoderDecoder):
         self.tensor_bundle = tensor_bundle
         
         self.case_ids : list[object] = list(tensor_bundle['case_ids'])
@@ -724,6 +724,9 @@ class EventLogDataset(Dataset):
         self.eos_padding : torch.Tensor = tensor_bundle['eos_padding']
         self.zero_padding : torch.Tensor = tensor_bundle['zero_padding']
         
+        num_rows = self.eos_padding.shape[0]
+        self.prefixes_petri_net_marking : torch.Tensor = torch.zeros(num_rows, 1)
+
         self.all_categories : tuple[list[tuple[str, int, dict[str, int]]]] = all_categories
         self.all_static_categories : tuple[list[tuple[str, int, dict[str, int]]]] = all_static_categories
         self.encoder_decoder : TensorEncoderDecoder = encoder_decoder
@@ -732,18 +735,82 @@ class EventLogDataset(Dataset):
         return self.eos_padding.shape[0]
 
     def __getitem__(self, idx):
+        case_id = self.case_ids[idx]
+        
         categorical_items = [tensor[idx] for tensor in self.categorical_tensors]
         continuous_items = [tensor[idx] for tensor in self.continuous_tensors]
-        case_id = self.case_ids[idx]
+        
         eos_mask = self.eos_padding[idx]
         zero_mask = self.zero_padding[idx]
+        
         static_cat = self.static_categorical_tensor[idx]
         static_cont = self.static_continuous_tensor[idx]
         
-        return (tuple(categorical_items),
+        prefixes_petri_net_marking = self.prefixes_petri_net_marking[idx]
+        
+        return (case_id,
+                tuple(categorical_items),
                 tuple(continuous_items),
                 eos_mask,
                 zero_mask,
                 static_cat,
                 static_cont,
-                case_id)
+                prefixes_petri_net_marking)
+    
+    
+    # Adjust the method if necessary: add the petri net markings to the dataset
+    def set_prefix_markings(self, indices: torch.Tensor, markings: torch.Tensor) -> None:
+        if markings.ndim == 1:
+            markings = markings.unsqueeze(-1)
+        if markings.shape[-1] != 1:
+            raise ValueError("markings must have a single column")
+        markings = markings.to(self.prefixes_petri_net_marking.device,
+                               dtype=self.prefixes_petri_net_marketing.dtype)
+        self.prefixes_petri_net_marking.index_copy_(0, indices, markings)
+
+
+# class for pre-processing the data for perturnbation:
+class EventLogPerturbationPreprocess:
+    def __init__(self, event_log_location, event_log_properties):
+        self.event_log_properties = event_log_properties
+        
+        self.event_log = CSV2EventLog(event_log_location, **event_log_properties) 
+        splitter = EventLogSplitter(**event_log_properties)
+        self.train_df, self.val_df, self.test_df = splitter.split(self.event_log)
+
+    def get_all_datasets(self):
+        return self.train_df, self.val_df, self.test_df
+
+    def extract_feature_info(self):
+        categories_info = {}
+        ranges_info = {}
+        
+        # Get all unique categories for each categorical column
+        categorical_columns = self.event_log_properties.get('categorical_columns', [])
+        for col in categorical_columns:
+            if col in self.event_log.df.columns:
+                # Get all unique values (excluding NaN)
+                unique_values = self.event_log.df[col].dropna().unique()
+                # Convert to list and sort for consistency
+                categories_info[col] = sorted([str(val) for val in unique_values if pd.notna(val)])
+            else:
+                categories_info[col] = []
+        
+        # Get min/max ranges for each continuous column
+        continuous_columns = self.event_log_properties .get('continuous_columns', []) + self.event_log_properties .get('continuous_positive_columns', [])
+        for col in continuous_columns:
+            if col in self.event_log.df.columns:
+                # Get non-null values
+                col_data = self.event_log.df[col].dropna()
+                if len(col_data) > 0:
+                    ranges_info[col] = {
+                        'min': float(col_data.min()),
+                        'max': float(col_data.max()),
+                        'mean': float(col_data.mean()),
+                        'std': float(col_data.std())
+                    }
+                else:
+                    ranges_info[col] = {'min': 0.0, 'max': 0.0, 'mean': 0.0, 'std': 0.0}
+            else:
+                ranges_info[col] = {'min': 0.0, 'max': 0.0, 'mean': 0.0, 'std': 0.0}
+        return {'categorical': categories_info, 'continuous': ranges_info}
