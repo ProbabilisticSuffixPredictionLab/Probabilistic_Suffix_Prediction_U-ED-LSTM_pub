@@ -10,6 +10,7 @@ from typing import Optional, Tuple, List
 
 class DropoutUncertaintyLSTMDecoder(nn.Module):
     def __init__(self,
+                 # dynamic attributes only
                  input_size: int,
                  hidden_size: int,
                  output_sizes: dict,

@@ -9,17 +9,20 @@ from .dropout_uncertainty_decoder import DropoutUncertaintyLSTMDecoder
 
 import torch
 from torch import nn, Tensor
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Union
 
 class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
     def __init__(self,
+                 # dynamic attributes
                  data_set_categories : list[tuple[str, dict[str, int]]],
                  enc_feat: list,
                  dec_feat: list,
                  seq_len_pred: int,
                  hidden_size: int,
                  num_layers: int,
-                 dropout: Optional[float]=None):
+                 dropout: Optional[float]=None,
+                 static_data_set_categories: Optional[list[tuple[str, dict[str, int]]]]=None,
+                 static_enc_feat: Optional[list]=None):
         
         """
         Full Encoder-Decoder architecture with droput uncertainty LSTM
@@ -39,6 +42,18 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         print("Data set categories: ", data_set_categories)
         self.enc_feat = enc_feat
         print("Encoder input features: ", enc_feat)
+        
+        self.static_data_set_categories = static_data_set_categories
+        print("Data set static categories: ", static_data_set_categories)
+        
+        if static_enc_feat is None:
+            self.static_enc_feat = [[], []]
+        else:
+            if len(static_enc_feat) != 2:
+                raise ValueError("static_enc_feat must contain two lists: [categorical, numerical]")
+            self.static_enc_feat = static_enc_feat
+            print("Encoder static input features: ", static_enc_feat)
+        
         self.dec_feat = dec_feat
         print("Decoder input+output features: ", dec_feat)
         
@@ -57,7 +72,7 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         print("Number of LSTM layer: ", num_layers)
         self.dropout = dropout
         print("Dropout rate: ", dropout)
-        
+
         print("\n")
         
         # Encoder
@@ -84,13 +99,47 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         self.input_size_enc = embedding_size_enc + num_size_enc 
         print("Input feature size encoder: ", self.input_size_enc)
         
+        self.embeddings_static_enc = nn.ModuleList()
+        self.static_data_indices_enc = [[], []]
+
+        if (self.static_data_set_categories is not None and
+                (len(self.static_enc_feat[0]) or len(self.static_enc_feat[1]))):
+            static_label_cats, static_label_nums = self.__get_list_labels_input(
+                data_set_categories=self.static_data_set_categories,
+                model_type_feats=self.static_enc_feat)
+            self.static_data_indices_enc = self.__get_list_tensor_indeces(
+                data_set_categories=self.static_data_set_categories,
+                model_type_feats=self.static_enc_feat)
+
+            if static_label_cats:
+                self.embeddings_static_enc = nn.ModuleList([
+                    nn.Embedding(n_cat, min(600, round(1.6 * n_cat**0.56)))
+                    for n_cat in static_label_cats
+                ])
+            static_embedding_size = sum(
+                [embedding.embedding_dim for embedding in self.embeddings_static_enc]
+            )
+            static_num_size = sum(static_label_nums)
+            self.static_input_size_enc = static_embedding_size + static_num_size
+            print("Static encoder categorical embeddings: ", self.embeddings_static_enc)
+            print("Total embedding feature size encoder (static): ", static_embedding_size)
+            print("Total numerical feature size encoder (static): ", static_num_size)
+        else:
+            self.static_input_size_enc = 0
+        print("Static encoder feature size: ", self.static_input_size_enc)
+        
+        
         # Define Encoder
-        self.encoder = DropoutUncertaintyLSTMEncoder(input_size=self.input_size_enc,
-                                                     hidden_size=hidden_size,
-                                                     embeddings=self.embeddings_enc,
-                                                     data_indices_enc=self.data_indices_enc, 
-                                                     num_layers=num_layers,
-                                                     dropout=dropout)
+        self.encoder = DropoutUncertaintyLSTMEncoder(
+            hidden_size=hidden_size,
+            embeddings=self.embeddings_enc,
+            data_indices_enc=self.data_indices_enc,
+            num_layers=num_layers,
+            input_size=self.input_size_enc,
+            static_embeddings=self.embeddings_static_enc,
+            static_data_indices=self.static_data_indices_enc,
+            dropout=dropout,
+        )
         print("Encoder initialized! \n")
         
         # Decoder
@@ -217,7 +266,11 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         # Return a list of two dicts: one for categorical and one for numerical features
         return [cat_index_dict, num_index_dict]
                
-    def forward(self, prefixes: List, suffixes: Optional[List]=None, teacher_forcing_ratio: Optional[float]=0.0):
+    def forward(self,
+                prefixes: List,
+                suffixes: Optional[List]=None,
+                teacher_forcing_ratio: Optional[float]=0.0,
+                static_inputs: Optional[Union[Tensor, List, Tuple, dict]] = None):
         """
         Full forward pass through the Encoder-Decoder architecture
         
@@ -225,6 +278,8 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         - prefixes: Input prefix sequence: list(list(tensor(categorical), list(tensor(numerical)))
         - suffixes: Suffix to predict: Tensor: list(list(tensor(categorical), list(tensor(numerical)))
         - teacher_forcing_ratio: Value between 0 and 1 to select pred or target as last event.
+        - static_inputs: Optional static attribute tensor(s) aligned with the batch dimension.
+                 Expected format: (static_cat_tensor, static_num_tensor) or a pre-projected tensor.
         
         OUTPUTS:
         - predictions: Predicted outcome. [categorical dict (key: feature name, value tensor), numerical dict (key: feature name, value tensor)]
@@ -240,7 +295,7 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         validation = not self.training and suffixes is not None              
         
         # Call encoder
-        (h_enc, c_enc) = self.encoder(input=prefixes)
+        (h_enc, c_enc) = self.encoder(input=prefixes, static_inputs=static_inputs)
                 
         # Get SOS event: Last prefx event:
         cat_prefixes, num_prefixes = prefixes
@@ -385,7 +440,8 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
                   prefix: Optional[list]=None,
                   last_event: Optional[list]=None,
                   hx: Optional[Tuple[Tensor, Tensor]]=None,
-                  z: Optional[Tuple[List, List]]=None):
+                  z: Optional[Tuple[List, List]]=None,
+                  static_inputs: Optional[Union[Tensor, List, Tuple, dict]] = None):
         """
         Inference method fo scenario analysis based on Monte Carlo sampling.
         
@@ -393,6 +449,8 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         - prefix: Input sequence of the model to be analyzed by encoder. (Set param only for the first model call)
         - last_event: Last event which was the output of the decoder. (Set param only after the first model call)
         - hx: Last hidden state which was the output of the decoder. (Set param only for the first model call) 
+        - static_inputs: Optional static attribute tensor(s) to merge with the latent space when encoding a prefix.
+                 Expected format: (static_cat_tensor, static_num_tensor) or a pre-projected tensor.
         
         OUTPUTS:
         - predictions: Predicted outcome. [categorical dict (key: feature name, value tensor), numerical dict (key: feature name, value tensor)]
@@ -402,7 +460,7 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
             # First Prediciton
             if prefix is not None:
                 # Call encoder
-                (h_enc, c_enc) = self.encoder(input=prefix)
+                (h_enc, c_enc) = self.encoder(input=prefix, static_inputs=static_inputs)
                         
                 # Get SOS event: Last prefx event:
                 cat_prefixes, num_prefixes = prefix
@@ -425,16 +483,17 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         """
         Store the trained model at path.
         """
-        checkpoint = {'model_state_dict' : self.state_dict(),
-                      'kwargs' : {
-                        'data_set_categories' : self.data_set_categories,
-                        'enc_feat': self.enc_feat,
-                        'dec_feat': self.dec_feat,
-                        'seq_len_pred': self.seq_len_pred,
-                        'hidden_size': self.hidden_size,
-                        'num_layers': self.num_layers,
-                        'dropout': self.dropout
-                      }
+        checkpoint = {'model_state_dict': self.state_dict(),
+                      'kwargs': {'data_set_categories': self.data_set_categories,
+                                 'enc_feat': self.enc_feat,
+                                 'dec_feat': self.dec_feat,
+                                 'seq_len_pred': self.seq_len_pred,
+                                 'hidden_size': self.hidden_size,
+                                 'num_layers': self.num_layers,
+                                 'dropout': self.dropout,
+                                 'static_data_set_categories': self.static_data_set_categories,
+                                 'static_enc_feat': self.static_enc_feat,
+                                }
                     }
         return torch.save(checkpoint, path)
 
@@ -446,6 +505,9 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         checkpoint = torch.load(path, weights_only=False, map_location=torch.device("cpu"))
         if dropout is not None:
             checkpoint['kwargs']['dropout'] = dropout
+        checkpoint['kwargs'].setdefault('static_data_set_categories', None)
+        checkpoint['kwargs'].setdefault('static_enc_feat', None)
+        checkpoint['kwargs'].pop('static_input_size_enc', None)
         model = DropoutUncertaintyEncoderDecoderLSTM(**checkpoint['kwargs'])
         model.load_state_dict(checkpoint['model_state_dict'])
         return model

@@ -462,6 +462,7 @@ class EventLogDataset(Dataset):
         self.tensor_list : tuple = tensor_tuple
         self.all_categories : tuple[list[tuple[str, int, dict[str : int]]]] = all_categories
         self.encoder_decoder : TensorEncoderDecoder = encoder_decoder
+        self.min_suffix_size : Optional[int] = getattr(encoder_decoder, 'min_suffix_size', None)
 
     def __len__(self):
         if len(self.tensor_list[0]):

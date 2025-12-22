@@ -63,8 +63,10 @@ class Trainer:
         print("Device: ", device)
         self.model = model.to(device)
         print("Model: ", model)
+        
         self.data_train = data_train
         print("Train Dataset: ", data_train)
+        
         self.data_val = data_val
         print("Validation Dataset: ", data_val)
         

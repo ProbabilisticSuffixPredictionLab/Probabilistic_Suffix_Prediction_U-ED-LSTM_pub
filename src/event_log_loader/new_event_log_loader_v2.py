@@ -508,10 +508,19 @@ class TensorEncoderDecoder:
                 if return_case_ids_and_eos_paddings:
                     case_ids.append(case_id)
                     flattened = np.array(padded_slice, dtype=int).squeeze(-1)
-                    eos_mask = [1.0 if (eos_token_id and value == eos_token_id) else 0.0 for value in flattened]
-                    zero_mask = [1.0 if value == 0 else 0.0 for value in flattened]
-                    eos_masks.append(eos_mask)
-                    zero_masks.append(zero_mask)
+                    eos_mask = np.ones_like(flattened, dtype=float)
+                    if eos_token_id and eos_token_id > 0:
+                        eos_positions = np.flatnonzero(flattened == eos_token_id)
+                        if eos_positions.size > 0:
+                            first_eos_idx = int(eos_positions[0])
+                            eos_mask[first_eos_idx + 1:] = 0.0
+                    zero_mask = np.zeros_like(flattened, dtype=float)
+                    non_zero_positions = np.flatnonzero(flattened != 0)
+                    if non_zero_positions.size > 0:
+                        first_valid_idx = int(non_zero_positions[0])
+                        zero_mask[first_valid_idx:] = 1.0
+                    eos_masks.append(eos_mask.tolist())
+                    zero_masks.append(zero_mask.tolist())
             windows.extend(padded_encodings)
 
         if len(windows) == 0:
@@ -730,6 +739,7 @@ class EventLogDataset(Dataset):
         self.all_categories : tuple[list[tuple[str, int, dict[str, int]]]] = all_categories
         self.all_static_categories : tuple[list[tuple[str, int, dict[str, int]]]] = all_static_categories
         self.encoder_decoder : TensorEncoderDecoder = encoder_decoder
+        self.min_suffix_size : Optional[int] = getattr(encoder_decoder, 'min_suffix_size', None)
 
     def __len__(self):
         return self.eos_padding.shape[0]

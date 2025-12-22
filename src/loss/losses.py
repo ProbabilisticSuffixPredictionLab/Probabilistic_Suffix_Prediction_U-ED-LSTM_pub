@@ -31,7 +31,7 @@ class Loss:
         # Loss value
         L = torch.sum((targets - preds) ** 2, dim=2)
 
-        # apply EOS padding mask
+        # apply EOS padding mask: loss is not computed when eos padding mask is 0.0
         L = L * eos_paddings
 
         # Normalize by number of valid tokens per batch
@@ -71,7 +71,7 @@ class Loss:
         
         L = torch.sum(0.5 * (inv_variances * ((targets - pred_means) ** 2) + pred_logvars), dim=2)
 
-        # apply EOS padding mask
+        # apply EOS padding mask: loss is not computed when eos padding mask is 0.0
         L = L * eos_paddings
 
         # Normalize by number of valid tokens per batch
@@ -113,7 +113,7 @@ class Loss:
         
         L = torch.sum(log_targets + 0.5 * (pred_logvars + (inv_variances * (log_targets - pred_means)**2)), dim=2)
         
-        # apply EOS padding mask
+        # apply EOS padding mask: loss is not computed when eos padding mask is 0.0
         L = L * eos_paddings
 
         # Normalize by number of valid tokens per batch
@@ -145,7 +145,7 @@ class Loss:
         
         L = CEL(input=pred_logits, target=targets)
 
-        # apply EOS padding mask
+        # apply EOS padding mask: loss is not computed when eos padding mask is 0.0
         L = L * eos_paddings
 
         # Normalize by number of valid tokens per batch
@@ -195,7 +195,7 @@ class Loss:
                
         L = (1/T) * L
 
-        # apply EOS padding mask
+        # apply EOS padding mask: loss is not computed when eos padding mask is 0.0
         L = L * eos_paddings
 
         # Normalize by number of valid tokens per batch
