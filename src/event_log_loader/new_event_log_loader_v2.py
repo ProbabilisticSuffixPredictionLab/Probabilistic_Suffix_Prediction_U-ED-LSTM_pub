@@ -7,7 +7,7 @@ from sklearn.impute import SimpleImputer
 import torch
 from torch.utils.data import Dataset
 from tqdm.notebook import tqdm
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Iterable
 from sklearn.base import BaseEstimator, TransformerMixin
 
 # raw dataframe of whole event log: creates a dataframe with dynamic attributes as lists and static as value
@@ -584,7 +584,7 @@ class TensorEncoderDecoder:
 
         if self.static_categorical_columns:
             cat_rows = []
-            for case_id in ordered_case_ids:
+            for case_id in tqdm(ordered_case_ids, desc="static categorical", leave=False):
                 row = []
                 case_record = case_static_values.get(case_id, {})
                 for col in self.static_categorical_columns:
@@ -599,7 +599,7 @@ class TensorEncoderDecoder:
 
         if self.static_continuous_columns:
             cont_rows = []
-            for case_id in ordered_case_ids:
+            for case_id in tqdm(ordered_case_ids, desc="static continuous", leave=False):
                 row = []
                 case_record = case_static_values.get(case_id, {})
                 for col in self.static_continuous_columns:
@@ -725,7 +725,7 @@ class EventLogDataset(Dataset):
         self.zero_padding : torch.Tensor = tensor_bundle['zero_padding']
         
         num_rows = self.eos_padding.shape[0]
-        self.prefixes_petri_net_marking : torch.Tensor = torch.zeros(num_rows, 1)
+        self.prefixes_petri_net_marking : list[Optional[object]] = [None] * num_rows
 
         self.all_categories : tuple[list[tuple[str, int, dict[str, int]]]] = all_categories
         self.all_static_categories : tuple[list[tuple[str, int, dict[str, int]]]] = all_static_categories
@@ -757,16 +757,25 @@ class EventLogDataset(Dataset):
                 static_cont,
                 prefixes_petri_net_marking)
     
-    
-    # Adjust the method if necessary: add the petri net markings to the dataset
-    def set_prefix_markings(self, indices: torch.Tensor, markings: torch.Tensor) -> None:
-        if markings.ndim == 1:
-            markings = markings.unsqueeze(-1)
-        if markings.shape[-1] != 1:
-            raise ValueError("markings must have a single column")
-        markings = markings.to(self.prefixes_petri_net_marking.device,
-                               dtype=self.prefixes_petri_net_marketing.dtype)
-        self.prefixes_petri_net_marking.index_copy_(0, indices, markings)
+    # Add the petri net markings to the dataset
+    def set_prefix_markings(self, markings, indices: Optional[Iterable[int]] = None) -> None:
+        markings_list = list(markings)
+
+        if indices is None:
+            if len(markings_list) != len(self.prefixes_petri_net_marking):
+                raise ValueError("Number of markings must match dataset length when indices are omitted")
+            target_indices = range(len(self.prefixes_petri_net_marking))
+        else:
+            target_indices = list(indices)
+            if len(target_indices) != len(markings_list):
+                raise ValueError("indices and markings must reference the same number of rows")
+
+        for idx, marking in zip(target_indices, markings_list):
+            if isinstance(marking, torch.Tensor):
+                marking = marking.detach().cpu().tolist()
+            elif isinstance(marking, np.ndarray):
+                marking = marking.tolist()
+            self.prefixes_petri_net_marking[idx] = marking
 
 
 # class for pre-processing the data for perturnbation:
