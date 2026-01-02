@@ -21,6 +21,7 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
                  hidden_size: int,
                  num_layers: int,
                  dropout: Optional[float]=None,
+                 # optional static attributes (only for encoder)
                  static_data_set_categories: Optional[list[tuple[str, dict[str, int]]]]=None,
                  static_enc_feat: Optional[list]=None):
         
@@ -29,36 +30,31 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         
         ARGS:
         - data_set_categories: Event attributes, name and size
-        - enc_feat: Event attributes used be encoder as input
-        - dec_feat Event attributes used be decoder as input and output
+        - enc_feat: Event attributes used by encoder as input
+        - dec_feat Event attributes used by decoder as input and output
         - num_layers: Number of hidden layers in both Encoder and Decoder
         - dropout: Dropout probability
+        - static_data_set_categories
+        - static_enc_feat
         """
         
         super(DropoutUncertaintyEncoderDecoderLSTM, self).__init__()
         
-        # Feature sizes
+        # Feature sizes encoder
         self.data_set_categories = data_set_categories
-        print("Data set categories: ", data_set_categories)
-        self.enc_feat = enc_feat
-        print("Encoder input features: ", enc_feat)
-        
+        print("Dynamic data set categories: ", data_set_categories)
         self.static_data_set_categories = static_data_set_categories
         print("Data set static categories: ", static_data_set_categories)
         
-        if static_enc_feat is None:
-            self.static_enc_feat = [[], []]
-        else:
-            if len(static_enc_feat) != 2:
-                raise ValueError("static_enc_feat must contain two lists: [categorical, numerical]")
-            self.static_enc_feat = static_enc_feat
-            print("Encoder static input features: ", static_enc_feat)
+        self.enc_feat = enc_feat
+        print("Encoder dynamic input features: ", enc_feat)
+        
+        self.static_enc_feat = static_enc_feat
+        if self.static_enc_feat:
+            print("Encoder static input features: ", self.static_enc_feat)
         
         self.dec_feat = dec_feat
-        print("Decoder input+output features: ", dec_feat)
-        
-        print("\n")
-        
+        print("Decoder input and output features: ", dec_feat)       
         # Sequence lenght prediciton
         self.seq_len_pred = seq_len_pred
         print("Sequence length of decoder output: ", seq_len_pred)
@@ -67,7 +63,7 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         
         # Parameters for encoder and decoder
         self.hidden_size = hidden_size
-        print("Cells hidden size: ", hidden_size)
+        print("LSTM cells and FC hidden size: ", hidden_size)
         self.num_layers = num_layers
         print("Number of LSTM layer: ", num_layers)
         self.dropout = dropout
@@ -75,12 +71,12 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
 
         print("\n")
         
-        # Encoder
+        # Encoder (dynamic)
+        print("Encoder dynamic:")
         # Get list of category label values for cat and num
         enc_label_cats, enc_label_nums = self.__get_list_labels_input(data_set_categories=data_set_categories, model_type_feats=enc_feat)
         self.data_labels_features_enc = [enc_label_cats, enc_label_nums]
         print("Encoder number of labels for each input feature (categorical, numerical): ", self.data_labels_features_enc)
-        
         data_cat_indices_enc, data_num_indices_enc = self.__get_list_tensor_indeces(data_set_categories=data_set_categories, model_type_feats=enc_feat)
         self.data_indices_enc = [data_cat_indices_enc, data_num_indices_enc]
         print("Encoder indices of tensors in dataset used as input: ", self.data_indices_enc)
@@ -92,54 +88,61 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         # Compute total input size encoder
         embedding_size_enc = sum([min(600, round(1.6 * n_cat**0.56)) for n_cat in enc_label_cats])
         print("Total embedding feature size encoder: ", embedding_size_enc)
-        
         num_size_enc = sum(enc_label_nums)
         print("Total numerical feature size encoder: ", num_size_enc)
-        
         self.input_size_enc = embedding_size_enc + num_size_enc 
         print("Input feature size encoder: ", self.input_size_enc)
         
-        self.embeddings_static_enc = nn.ModuleList()
-        self.static_data_indices_enc = [[], []]
-
-        if (self.static_data_set_categories is not None and
-                (len(self.static_enc_feat[0]) or len(self.static_enc_feat[1]))):
-            static_label_cats, static_label_nums = self.__get_list_labels_input(
-                data_set_categories=self.static_data_set_categories,
-                model_type_feats=self.static_enc_feat)
-            self.static_data_indices_enc = self.__get_list_tensor_indeces(
-                data_set_categories=self.static_data_set_categories,
-                model_type_feats=self.static_enc_feat)
-
-            if static_label_cats:
-                self.embeddings_static_enc = nn.ModuleList([
-                    nn.Embedding(n_cat, min(600, round(1.6 * n_cat**0.56)))
-                    for n_cat in static_label_cats
-                ])
-            static_embedding_size = sum(
-                [embedding.embedding_dim for embedding in self.embeddings_static_enc]
-            )
-            static_num_size = sum(static_label_nums)
-            self.static_input_size_enc = static_embedding_size + static_num_size
-            print("Static encoder categorical embeddings: ", self.embeddings_static_enc)
+        print("\n")
+                
+        # Encoder (static)
+        print("Encoder static:")
+        if self.static_enc_feat:
+            if self.static_data_set_categories is None:
+                raise ValueError("Static encoder features provided but static categories are missing.")
+            static_enc_label_cats, static_enc_label_nums = self.__get_list_labels_input(data_set_categories=self.static_data_set_categories, model_type_feats=self.static_enc_feat)
+            self.data_labels_static_features_enc = [static_enc_label_cats, static_enc_label_nums]
+            print("Encoder number of labels for each input feature (categorical, numerical): ", self.data_labels_static_features_enc)
+            static_data_cat_indices_enc, static_data_num_indices_enc = self.__get_list_tensor_indeces(data_set_categories=self.static_data_set_categories, model_type_feats=self.static_enc_feat)
+            self.static_data_indices_enc = [static_data_cat_indices_enc, static_data_num_indices_enc]
+            print("Encoder indices of tensors in dataset used as input (static): ", self.static_data_indices_enc)
+            
+            # Embedding
+            if static_enc_label_cats:
+                self.embeddings_static_enc = nn.ModuleList([nn.Embedding(n_cat, min(600, round(1.6 * n_cat**0.56)))for n_cat in static_enc_label_cats])
+                static_embedding_size = sum([embedding.embedding_dim for embedding in self.embeddings_static_enc])
+                print("Static encoder categorical embeddings: ", self.embeddings_static_enc)
+            else:
+                static_embedding_size = 0
             print("Total embedding feature size encoder (static): ", static_embedding_size)
+                
+            if static_enc_label_nums:   
+                static_num_size = sum(static_enc_label_nums)
+            else:
+                static_num_size = 0
             print("Total numerical feature size encoder (static): ", static_num_size)
+              
+            # Total sizes     
+            self.static_input_size_enc = static_embedding_size + static_num_size
+            print("Static encoder feature size: ", self.static_input_size_enc)
         else:
-            self.static_input_size_enc = 0
-        print("Static encoder feature size: ", self.static_input_size_enc)
+            print("No static encoder features configured.")
         
         
         # Define Encoder
-        self.encoder = DropoutUncertaintyLSTMEncoder(
-            hidden_size=hidden_size,
-            embeddings=self.embeddings_enc,
-            data_indices_enc=self.data_indices_enc,
-            num_layers=num_layers,
-            input_size=self.input_size_enc,
-            static_embeddings=self.embeddings_static_enc,
-            static_data_indices=self.static_data_indices_enc,
-            dropout=dropout,
-        )
+        self.encoder = DropoutUncertaintyLSTMEncoder(hidden_size=hidden_size,
+                                                     # dynamics
+                                                     embeddings=self.embeddings_enc,
+                                                     data_indices_enc=self.data_indices_enc,
+                                                     input_size=self.input_size_enc,
+                                                     # layers
+                                                     num_layers=num_layers,
+                                                     # static feat
+                                                     static_embeddings=self.embeddings_static_enc,
+                                                     static_data_indices=self.static_data_indices_enc,
+                                                     static_input_size = self.static_input_size_enc,
+                                                     # dropout
+                                                     dropout=dropout)
         print("Encoder initialized! \n")
         
         # Decoder
@@ -268,18 +271,17 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
                
     def forward(self,
                 prefixes: List,
+                static_inputs: Optional[Union[Tensor, List, Tuple, dict]] = None,
                 suffixes: Optional[List]=None,
-                teacher_forcing_ratio: Optional[float]=0.0,
-                static_inputs: Optional[Union[Tensor, List, Tuple, dict]] = None):
+                teacher_forcing_ratio: Optional[float]=0.0,):
         """
         Full forward pass through the Encoder-Decoder architecture
         
         INPUTS:
         - prefixes: Input prefix sequence: list(list(tensor(categorical), list(tensor(numerical)))
+        - static_inputs: Optional static attribute tensor(s) aligned with the batch dimension. Expected format: (static_cat_tensor, static_num_tensor) or a pre-projected tensor.
         - suffixes: Suffix to predict: Tensor: list(list(tensor(categorical), list(tensor(numerical)))
         - teacher_forcing_ratio: Value between 0 and 1 to select pred or target as last event.
-        - static_inputs: Optional static attribute tensor(s) aligned with the batch dimension.
-                 Expected format: (static_cat_tensor, static_num_tensor) or a pre-projected tensor.
         
         OUTPUTS:
         - predictions: Predicted outcome. [categorical dict (key: feature name, value tensor), numerical dict (key: feature name, value tensor)]
@@ -287,7 +289,6 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         - self.seq_len_pred: Sequence length.
         - self.output_feature_indeces: Target data indices: [categorical dict(key: feature name, value: index of tensor in categorical list of dataset), 
                                                              numerical dict(key: feature name, value: index of tensor in numerical list of dataset)]
-        
         """
         # Model is in training mode and suffixes are provided
         training = self.training and suffixes is not None
@@ -436,12 +437,17 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
                 
         return last_event
     
+    
+    # During test time:
     def inference(self,
+                  # dynamic event attributes for encoder
                   prefix: Optional[list]=None,
+                  # static event attributes for encoder
+                  static_inputs: Optional[Union[Tensor, List, Tuple, dict]] = None,
+                  # last prefix event (decoder (dynamic) event attributes only)
                   last_event: Optional[list]=None,
                   hx: Optional[Tuple[Tensor, Tensor]]=None,
-                  z: Optional[Tuple[List, List]]=None,
-                  static_inputs: Optional[Union[Tensor, List, Tuple, dict]] = None):
+                  z: Optional[Tuple[List, List]]=None):
         """
         Inference method fo scenario analysis based on Monte Carlo sampling.
         
@@ -449,8 +455,7 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         - prefix: Input sequence of the model to be analyzed by encoder. (Set param only for the first model call)
         - last_event: Last event which was the output of the decoder. (Set param only after the first model call)
         - hx: Last hidden state which was the output of the decoder. (Set param only for the first model call) 
-        - static_inputs: Optional static attribute tensor(s) to merge with the latent space when encoding a prefix.
-                 Expected format: (static_cat_tensor, static_num_tensor) or a pre-projected tensor.
+        - static_inputs: Optional static attribute tensor(s) to merge with the latent space when encoding a prefix. Expected format: (static_cat_tensor, static_num_tensor) or a pre-projected tensor.
         
         OUTPUTS:
         - predictions: Predicted outcome. [categorical dict (key: feature name, value tensor), numerical dict (key: feature name, value tensor)]
@@ -459,7 +464,8 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         with torch.no_grad():
             # First Prediciton
             if prefix is not None:
-                # Call encoder
+                
+                # Call encoder (static inputs are only used here)
                 (h_enc, c_enc) = self.encoder(input=prefix, static_inputs=static_inputs)
                         
                 # Get SOS event: Last prefx event:

@@ -253,6 +253,9 @@ class PrefixesDataFrameLoader:
         cleaned = series.dropna()
         if cleaned.empty:
             return np.nan
+        cleaned = cleaned[cleaned != 'EOS']
+        if cleaned.empty:
+            return np.nan
         return cleaned.iloc[0]
 
     def _limit_sequence(self, values):
@@ -400,7 +403,12 @@ class TensorEncoderDecoder:
     def train_imputers_encoders(self):
         # categorical encoders: fit on 2D numpy arrays with dtype=object
         for col, categorical_encoder in self.categorical_encoders.items():
-            column_data = self.event_log[[col]].astype(object).to_numpy()  # shape (n,1)
+            column_series = self.event_log[col].astype(object)
+            
+            if col in self.static_categorical_columns:
+                column_series = column_series[column_series != 'EOS']
+            
+            column_data = column_series.to_numpy().reshape(-1, 1)
             categorical_encoder.fit(column_data)
 
         # continuous encoders / imputers: fit on 2D numpy arrays (n_samples, 1)
@@ -467,7 +475,11 @@ class TensorEncoderDecoder:
             all_categories[1].append((col, 1, dict()))
 
         for col in self.static_categorical_columns:
-            filtered_categories = [category for category in self.categorical_encoders[col].categories_[0] if category != 'EOS']
+            filtered_categories = [
+                category
+                for category in self.categorical_encoders[col].categories_[0]
+                if category != 'EOS' and not pd.isna(category)
+            ]
             categories = {category: idx + 1 for idx, category in enumerate(filtered_categories)}
             max_classes = len(filtered_categories) + 1
             static_categories[0].append((col, max_classes, categories))
@@ -598,6 +610,9 @@ class TensorEncoderDecoder:
                 case_record = case_static_values.get(case_id, {})
                 for col in self.static_categorical_columns:
                     value = case_record.get(col, np.nan)
+                    if value == 'EOS' or pd.isna(value):
+                        row.append(0)
+                        continue
                     value_arr = np.array([[value]], dtype=object)
                     encoded_value = self.categorical_encoders[col].transform(value_arr) + 1
                     row.append(int(encoded_value.squeeze()))

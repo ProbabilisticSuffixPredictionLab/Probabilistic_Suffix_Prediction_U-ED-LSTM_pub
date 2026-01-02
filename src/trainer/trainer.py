@@ -5,10 +5,16 @@ Uses gradient normalization (GradNorm) technique to balance task losses dynamica
 - Chen Z. et.al, GradNorm: "Gradient Normalization for Adaptive Loss Balancing in Deep Multitask Networks", ICML, 2018.
 """
 
+
+# performance imports for torch: torch kernel uses one core only.
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["TORCH_NUM_THREADS"] = "1" 
+
 import torch
 from torch.utils.data import DataLoader
 from tqdm.notebook import tqdm
-import numpy as np
 
 class Trainer:
     def __init__(self,
@@ -107,6 +113,7 @@ class Trainer:
 
         # Gradnorm parameters
         self.gradnorm_values = gradnorm_values
+        self.use_gradnorm = False
         if gradnorm_values is not None:
             self.use_gradnorm = gradnorm_values["use_gradnorm"]
             print("Use GradNorm: ", self.use_gradnorm)
@@ -118,7 +125,7 @@ class Trainer:
                 print("GradNorm learning rate: ", self.gn_learning_rate)
                 self.number_tasks = gradnorm_values["number_tasks"]
                 
-                self.gn_weights = torch.nn.Parameter(torch.ones(self.number_tasks, dtype=torch.float))
+                self.gn_weights = torch.nn.Parameter(torch.ones(self.number_tasks, dtype=torch.float, device=self.device))
                 print("Initial GradNorm loss weights: ",self.gn_weights)
                 self.l0 = None
                 print("Initial loss values: ", self.l0)
@@ -145,15 +152,8 @@ class Trainer:
         val_attenuated_losses = []
 
         # Validation dataloader
-        val_dataloader = DataLoader(dataset=self.data_val, batch_size=self.mini_batches, shuffle=self.shuffle, num_workers=0, pin_memory=True)
-        
-        # Teacher forcing reducing index:
-        k = 1
-
-        # choose sigmoid teacher forcing hyperparams (tweak to taste)
-        midpoint = 0.5 * self.epochs          # default: halfway through training
-        scale = 0.1 * self.epochs             # default: transition width (10% of total epochs)
-        
+        val_dataloader = DataLoader(dataset=self.data_val, batch_size=self.mini_batches, shuffle=self.shuffle, num_workers=4, pin_memory=True)
+                
         # Trainings/ Epoch Loop
         for epoch in range(self.epochs):#tqdm(range(self.epochs)):
             
@@ -169,24 +169,31 @@ class Trainer:
             # Reduce Teacher forcing ratio dynamically:
             self.teacher_forcing_ratio = max(self.min_teacher_forcing_ratio, 1 - epoch / (self.epochs * 0.5))
 
-            # Sigmoid decreasing schedule
-            # Starts near 1, smoothly decays to near 0
-            # self.teacher_forcing_ratio = 1 / (1 + np.exp((epoch - midpoint) / scale))
-
             # Bacth Loop
             for i, train_data in enumerate(train_dataloader): 
-                cats, nums, eos_paddings, _ = train_data
-                            
-                # Automize this            
+                _, cats, nums, eos_paddings, zero_paddings, cats_static, nums_static, _ = train_data
+            
+                static_inputs = self._prepare_static_inputs(cats_static, nums_static)
                 
-                            
+                # without masking the front zeros
                 # dim: list(list(Tensors categorical: dim: batch size x window size-4), list(Tensors numerical: dim: batch size x window size-4))
-                prefixes_cat = [cat[:, :-self.suffix_data_split_value].to(self.device) for cat in cats]
-                prefixes_num = [num[:, :-self.suffix_data_split_value].to(self.device) for num in nums]
+                # prefixes_cat = [cat[:, :-self.suffix_data_split_value].to(self.device) for cat in cats]
+                # prefixes_num = [num[:, :-self.suffix_data_split_value].to(self.device) for num in nums]
+                # prefixes = [prefixes_cat, prefixes_num]
+                
+                # suffixes_cat = [cat[:, -self.suffix_data_split_value:].to(self.device) for cat in cats]
+                # suffixes_num = [num[:, -self.suffix_data_split_value:].to(self.device) for num in nums]
+                # suffixes = [suffixes_cat, suffixes_num]
+
+                # with masking the front zeros
+                masked_cats, masked_nums = self._apply_zero_padding_masks(cats, nums, zero_paddings)
+                
+                prefixes_cat = [cat[:, :-self.suffix_data_split_value] for cat in masked_cats]
+                prefixes_num = [num[:, :-self.suffix_data_split_value] for num in masked_nums]
                 prefixes = [prefixes_cat, prefixes_num]
                 
-                suffixes_cat = [cat[:, -self.suffix_data_split_value:].to(self.device) for cat in cats]
-                suffixes_num = [num[:, -self.suffix_data_split_value:].to(self.device) for num in nums]
+                suffixes_cat = [cat[:, -self.suffix_data_split_value:] for cat in masked_cats]
+                suffixes_num = [num[:, -self.suffix_data_split_value:] for num in masked_nums]
                 suffixes = [suffixes_cat, suffixes_num]
 
                 eos_paddings_suffix = eos_paddings[:, -self.suffix_data_split_value:].to(self.device)
@@ -195,12 +202,18 @@ class Trainer:
                 if self.use_gradnorm:
                     # all_losses: list of two dicts, categorical dict and numerical dict: key: feature name, value: tensor loss
                     # loss: Tensor of total loss
-                    all_losses_dict, loss_value = self.train_epoch_gradnorm(prefixes=prefixes, suffixes=suffixes, eos_paddings=eos_paddings_suffix)
+                    all_losses_dict, loss_value = self.train_epoch_gradnorm(prefixes=prefixes,
+                                                                            suffixes=suffixes,
+                                                                            eos_paddings=eos_paddings_suffix,
+                                                                            static_inputs=static_inputs)
                     cat_losses_dict, num_losses_dict = all_losses_dict
                      
                 # Standard Training:    
                 else:
-                    all_losses_dict, loss_value = self.train_epoch(prefixes=prefixes, suffixes=suffixes, eos_paddings=eos_paddings_suffix)
+                    all_losses_dict, loss_value = self.train_epoch(prefixes=prefixes,
+                                                                   suffixes=suffixes,
+                                                                   eos_paddings=eos_paddings_suffix,
+                                                                   static_inputs=static_inputs)
                     cat_losses_dict, num_losses_dict = all_losses_dict
                 
                 # Accumulate the categorical losses
@@ -329,13 +342,38 @@ class Trainer:
 
         return train_attenuated_losses, val_losses, val_attenuated_losses
     
-    def train_epoch(self, prefixes, suffixes, eos_paddings):
+    def _apply_zero_padding_masks(self, cats, nums, zero_paddings):
+        """Apply zero-padding masks so left-padded entries stay at 0 and move tensors to the target device."""
+        zero_mask = zero_paddings.to(self.device)
+        zero_mask_long = zero_mask.to(dtype=torch.long)
+
+        masked_cats = [cat.to(self.device) * zero_mask_long for cat in cats]
+        masked_nums = [num.to(self.device) * zero_mask for num in nums]
+        return masked_cats, masked_nums
+
+    def _prepare_static_inputs(self, cats_static, nums_static):
+        """Prepare optional static tensors for encoder merging."""
+        static_cat = None
+        static_num = None
+
+        if cats_static is not None and cats_static.numel() > 0:
+            static_cat = cats_static.to(self.device)
+        if nums_static is not None and nums_static.numel() > 0:
+            static_num = nums_static.to(self.device)
+
+        if static_cat is None and static_num is None:
+            return None
+        return (static_cat, static_num)
+    
+    def train_epoch(self, prefixes, suffixes, eos_paddings, static_inputs=None):
         """
         Train the model on batches.
 
         INPUTS:
         - prefixes: 
-        - suffixes: 
+        - suffixes:
+        - eos_paddings:
+        - static_inputs 
 
         OUTPUTS:
         - all_losses:
@@ -343,7 +381,10 @@ class Trainer:
         """
         # predictions: List of two Dicts one for categorical (means and vars), one for numerical (means and vars): key: feature name + _mean or _var, value: tensor with dim: seq len x batch size x output feature size
         # data_features_indeces_dec: List of two Dicts one for categorical, one for numerical: key: feature name, value: index of tensor in data list
-        predictions, _, _, data_features_indeces_dec= self.model(prefixes=prefixes, suffixes=suffixes, teacher_forcing_ratio=self.teacher_forcing_ratio)
+        predictions, _, _, data_features_indeces_dec= self.model(prefixes=prefixes,
+                                                                 suffixes=suffixes,
+                                                                 teacher_forcing_ratio=self.teacher_forcing_ratio,
+                                                                 static_inputs=static_inputs)
         
         # Get cat and num predictions
         predictions_cat, predictions_num = predictions
@@ -377,7 +418,9 @@ class Trainer:
                 var_cat_pred = predictions_cat.get(f'{feature_name}_var') # dim: seq len x batch size x number classes
                 target_cat = cat_suffixes_dict[feature_name] # dim: batch size x seq len
                 # Loss caluclation
-                loss_cat = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred, pred_logvars=var_cat_pred, T=30, targets=target_cat.long(),
+                loss_cat = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred,
+                                                                        pred_logvars=var_cat_pred,
+                                                                        T=30, targets=target_cat.long(),
                                                                         eos_paddings=eos_paddings)
                 
                 if (feature_name in cat_loss_dict):
@@ -435,7 +478,7 @@ class Trainer:
         
         return all_losses, loss
 
-    def train_epoch_gradnorm(self, prefixes, suffixes, eos_paddings):
+    def train_epoch_gradnorm(self, prefixes, suffixes, eos_paddings, static_inputs=None):
         """
         Train the model on batches and weight MTL lossses using GradNorm.
 
@@ -448,7 +491,10 @@ class Trainer:
         - loss: Total loss: weighted_loss + regularizations
         """
         # Predictions  
-        predictions, (h,_), _, data_features_indeces_dec= self.model(prefixes=prefixes, suffixes=suffixes, teacher_forcing_ratio=self.teacher_forcing_ratio)
+        predictions, (h,_), _, data_features_indeces_dec= self.model(prefixes=prefixes,
+                                                                     suffixes=suffixes,
+                                                                     teacher_forcing_ratio=self.teacher_forcing_ratio,
+                                                                     static_inputs=static_inputs)
         
         predictions_cat, predictions_num = predictions
         
@@ -479,7 +525,10 @@ class Trainer:
                 target_cat = cat_suffixes_dict[feature_name] # dim: batch size x seq len
 
                 # Loss caluclation
-                loss_cat = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred, pred_logvars=var_cat_pred, T=30, targets=target_cat.long(),
+                loss_cat = self.loss_obj.loss_attenuation_cross_entropy(pred_logits=mean_cat_pred,
+                                                                        pred_logvars=var_cat_pred,
+                                                                        T=30,
+                                                                        targets=target_cat.long(),
                                                                         eos_paddings=eos_paddings)
 
                 if (feature_name in cat_loss_dict):
@@ -503,7 +552,9 @@ class Trainer:
                 target_num = num_suffixes_dict[feature_name] # dim: batch size x seq len
 
                 # Normal loss:
-                loss_num = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred, pred_logvars=var_num_pred, targets=target_num,
+                loss_num = self.loss_obj.loss_attenuation_mse(pred_means=mean_num_pred,
+                                                              pred_logvars=var_num_pred,
+                                                              targets=target_num,
                                                               eos_paddings=eos_paddings)
                 # print("normal loss")
                                 
@@ -532,8 +583,7 @@ class Trainer:
         weight_reg = weight_reg_enc + weight_reg_dec
         bias_reg = bias_reg_enc + bias_reg_dec
 
-        # Ensure that the GradNorm weights are on the correct device
-        weighted_loss = self.gn_weights.to(self.device) * gn_seq_loss
+        weighted_loss = self.gn_weights * gn_seq_loss
         loss = weighted_loss.sum() + self.regularization_term * (weight_reg.to(self.device) + bias_reg.to(self.device))
 
         # Compute gradients for model parameters
@@ -603,21 +653,28 @@ class Trainer:
             
             for _, val_data in enumerate(val_dataloader): 
                 
-                cats, nums, eos_paddings, _ = val_data    
+                _, cats, nums, eos_paddings, zero_paddings, cats_static, nums_static, _ = val_data
+
+                # masked 
+                masked_cats, masked_nums = self._apply_zero_padding_masks(cats, nums, zero_paddings)
+                eos_paddings = eos_paddings.to(self.device)
+                static_inputs = self._prepare_static_inputs(cats_static, nums_static)
                 
-                # dim: list(list(Tensors categorical: dim: batch size x window size-4), list(Tensors numerical: dim: batch size x window size-4))
-                prefixes_cat = [cat[:, :-self.suffix_data_split_value].to(self.device) for cat in cats]
-                prefixes_num = [num[:, :-self.suffix_data_split_value].to(self.device) for num in nums]
+                prefixes_cat = [cat[:, :-self.suffix_data_split_value] for cat in masked_cats]
+                prefixes_num = [num[:, :-self.suffix_data_split_value] for num in masked_nums]
                 prefixes = [prefixes_cat, prefixes_num]
                     
-                suffixes_cat = [cat[:, -self.suffix_data_split_value:].to(self.device) for cat in cats]
-                suffixes_num = [num[:, -self.suffix_data_split_value:].to(self.device) for num in nums]
+                suffixes_cat = [cat[:, -self.suffix_data_split_value:] for cat in masked_cats]
+                suffixes_num = [num[:, -self.suffix_data_split_value:] for num in masked_nums]
                 suffixes = [suffixes_cat, suffixes_num]
 
-                eos_paddings_suffix = eos_paddings[:, -self.suffix_data_split_value:].to(self.device)
+                eos_paddings_suffix = eos_paddings[:, -self.suffix_data_split_value:]
 
                 # Model predictions:
-                predictions, _, _, data_features_indeces_dec= self.model(prefixes=prefixes, suffixes=suffixes, teacher_forcing_ratio=self.teacher_forcing_ratio)
+                predictions, _, _, data_features_indeces_dec= self.model(prefixes=prefixes,
+                                                                         suffixes=suffixes,
+                                                                         teacher_forcing_ratio=self.teacher_forcing_ratio,
+                                                                         static_inputs=static_inputs)
                 predictions_cat, predictions_num = predictions
                 
                 # Targets
