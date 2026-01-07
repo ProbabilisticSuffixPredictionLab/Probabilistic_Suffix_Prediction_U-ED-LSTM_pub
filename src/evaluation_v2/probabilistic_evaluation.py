@@ -52,17 +52,18 @@ class ProbabilisticEvaluation(Evaluation):
                                                                     cat_means,
                                                                     cat_variances)
     @torch.jit.script
-    def sample_cat_predictions_optim(
-                               all_cat_attributes : list[str],
-                               use_variance_cat : bool,
-                               sample_argmax : bool,
-                               cat_means : dict[str, torch.Tensor],
-                               cat_variances : dict[str, torch.Tensor]
-     ) -> dict[str, torch.Tensor]:
+    def sample_cat_predictions_optim(all_cat_attributes : list[str],
+                                     use_variance_cat : bool,
+                                     sample_argmax : bool,
+                                     cat_means : dict[str, torch.Tensor],
+                                     cat_variances : dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         result = {}
         for c in all_cat_attributes:
             if use_variance_cat:
-                sampled_cats = torch.normal(cat_means[c+'_mean'], torch.exp(cat_variances[c+'_var']))
+                # cat_variances[*_var] is treated as log-variance (consistent with training loss).
+                logvar = torch.clamp(cat_variances[c+'_var'], min=-6.0, max=6.0)
+                std = torch.exp(0.5 * logvar)
+                sampled_cats = torch.normal(cat_means[c+'_mean'], std)
             else:
                 sampled_cats = cat_means[c+'_mean']
             
@@ -83,13 +84,12 @@ class ProbabilisticEvaluation(Evaluation):
                                                                     last_values)
 
     @torch.jit.script
-    def sample_num_predictions_optim(
-                               all_num_attributes : list[str],
-                               use_variance_num : bool,
-                               growing_num_values : list[str],                        
-                               num_means : dict[str, torch.Tensor],
-                               num_variances : dict[str, torch.Tensor],
-                               last_values : dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    def sample_num_predictions_optim(all_num_attributes : list[str],
+                                     use_variance_num : bool,
+                                     growing_num_values : list[str],                        
+                                     num_means : dict[str, torch.Tensor],
+                                     num_variances : dict[str, torch.Tensor],
+                                     last_values : dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         result = {}
         for c in all_num_attributes:
             if use_variance_num:
@@ -108,14 +108,13 @@ class ProbabilisticEvaluation(Evaluation):
         
         return result
     
-    def sample_suffix(self, prefix, prefix_len, static_inputs, include_model_states):
+    def sample_suffix(self, prefix, prefix_len, static_inputs, mask, include_model_states):
         # add first the prefix and static attributes:
-        prediction, (h, c), z = self.model.inference(prefix=prefix, static_inputs=static_inputs)
+        # Pass mask to inference (encoder)
+        prediction, (h, c), z = self.model.inference(prefix=prefix, static_inputs=static_inputs, mask=mask)
         suffix = []
         
-        max_iteration = self.dataset.encoder_decoder.window_size - \
-                        self.dataset.encoder_decoder.min_suffix_size - \
-                        prefix_len
+        max_iteration = self.dataset.encoder_decoder.window_size - self.dataset.encoder_decoder.min_suffix_size - prefix_len
         
         last_means = {a+'_mean' : prefix[1][self.all_num_attributes.index(a)][:,-1].unsqueeze(1) for a in self.growing_num_values}
         
@@ -128,9 +127,8 @@ class ProbabilisticEvaluation(Evaluation):
         i = 0
         eos_predicted = lambda : cat_predictions[self.concept_name+'_mean'] == self.eos_id
         while i <= max_iteration and not eos_predicted():
-            
             readable_prediction = self.prediction_to_readable(cat_predictions, num_predictions)
-            
+            #
             suffix.append(readable_prediction)
             
             if include_model_states:
@@ -156,10 +154,10 @@ class ProbabilisticEvaluation(Evaluation):
         else:
             return suffix
 
-    def predict_probabilistic_suffix(self, prefix, prefix_len, static_inputs, include_model_states):
+    def predict_probabilistic_suffix(self, prefix, prefix_len, static_inputs, mask, include_model_states):
         suffixes = []
         for _ in range(self.samples_per_case):
-            suffix = self.sample_suffix(prefix, prefix_len, static_inputs, include_model_states)
+            suffix = self.sample_suffix(prefix, prefix_len, static_inputs, mask, include_model_states)
             suffixes.append(suffix)
         return suffixes     
     
@@ -185,29 +183,23 @@ class ProbabilisticEvaluation(Evaluation):
                 yield case_name, prefix_len, None, None, None, None
     
     
-    def _evaluate_single(self, case_name, prefix_len, prefix, statics, suffix, include_model_states):
-        readable_prefix = self.case_to_readable(prefix, prune_eos=False)
-        # print("Prefix: ", readable_prefix)
-        
+    def _evaluate_single(self, case_name, prefix_len, prefix, mask, statics, suffix, include_model_states):
+        readable_prefix = self.case_to_readable(prefix, prune_eos=False)        
         readable_suffix = self.case_to_readable(suffix, prune_eos=True)
-        # print("Suffix: ", readable_suffix)
+        mean_prediction = self._predict_suffix_with_means(prefix_len, prefix, statics, mask)
+        predicted_suffixes = self.predict_probabilistic_suffix(prefix, prefix_len, statics, mask, include_model_states)
         
-        mean_prediction = self._predict_suffix_with_means(prefix_len, prefix, statics)
-        # print("Mean Pred: ", mean_prediction)
-        
-        predicted_suffixes = self.predict_probabilistic_suffix(prefix, prefix_len, statics, include_model_states)
-        
+        # print the cases prefixes: Activity only
         # print(case_name)
         # print(prefix_len)
-        # print("prefix:", readable_prefix)
-        # print("pred. most likley suffix:", predicted_suffixes)
-        # print("target suffix: ", readable_suffix)
-        
-        print("\n")
-        # print(mean_prediction)
+        # print("prefix:", [prefix['Activity'] for prefix in readable_prefix])
+        # print("target suffix: ",  [suffix['Activity'] for suffix in readable_suffix])
+        # print("most likely", [suffix['Activity'] for suffix in mean_prediction])
 
         return case_name, prefix_len, readable_prefix, predicted_suffixes, readable_suffix, mean_prediction
     
+    
+    # Evaluate methods 
                     
     # 
     def evaluate(self, random_order=False, include_model_states=False):
@@ -216,15 +208,8 @@ class ProbabilisticEvaluation(Evaluation):
         if random_order:
             case_items = random.sample(case_items, len(case_items))
         for _, (case_name, full_case) in tqdm(enumerate(case_items), total=len(self.cases)):
-            print(case_name)
-            print(full_case)
-            for _, (prefix_len, prefix, statics, suffix) in enumerate(self._iterate_case(full_case)):
-                # print(prefix_len)
-                # print(prefix)
-                # print(statics)
-                # print(suffix)
-                
-                yield self._evaluate_single(case_name, prefix_len, prefix, statics, suffix, include_model_states)
+            for _, (prefix_len, prefix, zero_mask, statics, suffix) in enumerate(self._iterate_case(full_case)):
+                yield self._evaluate_single(case_name, prefix_len, prefix, zero_mask, statics, suffix, include_model_states)
                 
             break
 
@@ -238,13 +223,17 @@ class ProbabilisticEvaluation(Evaluation):
         #multiprocessing.set_start_method('spawn', force=True)
         with concurrent.futures.ProcessPoolExecutor(max_workers=self.num_processes) as executor:
             for i, (case_name, full_case) in tqdm(enumerate(case_items), total=len(self.cases)):
-                for j, (prefix_len, prefix, static_atts, suffix) in enumerate(self._iterate_case(full_case)):
+                for j, (prefix_len, prefix, zero_mask, statics, suffix) in enumerate(self._iterate_case(full_case)):
                     # we need an explicit copy here - otherwise we run into very bad memory issues
                     prefix = [[t.clone() for t in i] for i in prefix]
                     suffix = [[t.clone() for t in i] for i in suffix]
-                    static_copy = self._clone_static_attributes(static_atts)
                     
-                    future = executor.submit(self._evaluate_single, case_name, prefix_len, prefix, static_copy, suffix, include_model_states)
+                    static_copy = self._clone_static_attributes(statics)
+                    
+                    # Also clone mask
+                    mask_copy = zero_mask.clone() if zero_mask is not None else None
+
+                    future = executor.submit(self._evaluate_single, case_name, prefix_len, prefix, mask_copy, static_copy, suffix, include_model_states)
                     futures.append(future)
 
                     if len(futures) >= max_in_flight:
@@ -268,20 +257,23 @@ class ProbabilisticEvaluation(Evaluation):
         futures = []
         with concurrent.futures.ProcessPoolExecutor(max_workers=self.num_processes) as executor:
             for case_name, full_case in tqdm(case_items, total=len(self.cases)):
-                for prefix_len, prefix, static_atts, suffix in self._iterate_case(full_case):
+                for prefix_len, prefix, zero_mask, statics, suffix in self._iterate_case(full_case):
+                    
                     if (case_name, prefix_len) in processed_prefixes:
                         print("skipped", case_name, prefix_len)
                     else:
                         # Copy to avoid memory issues
                         prefix = [[t.clone() for t in i] for i in prefix]
                         suffix = [[t.clone() for t in i] for i in suffix]
-                        static_copy = self._clone_static_attributes(static_atts)
+                        static_copy = self._clone_static_attributes(statics)
+                        mask_copy = zero_mask.clone() if zero_mask is not None else None
 
                         future = executor.submit(
                             self._evaluate_single,
                             case_name,
                             prefix_len,
                             prefix,
+                            mask_copy,
                             static_copy,
                             suffix,
                             include_model_states,

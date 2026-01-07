@@ -37,6 +37,8 @@ class DropoutUncertaintyLSTMDecoder(nn.Module):
         self.data_indices_dec = data_indices_dec
 
         self.input_proj = nn.Linear(input_size, hidden_size)
+        self.layernorm = nn.LayerNorm(hidden_size)
+        self.act = nn.ReLU()
 
         # Create a first cell:
         self.first_layer = DropoutUncertaintyLSTMCell(input_size=hidden_size, hidden_size=hidden_size, dropout=dropout)
@@ -146,6 +148,8 @@ class DropoutUncertaintyLSTMDecoder(nn.Module):
         event = self.__data_enc_for_model(data=input, pred=pred)  # dim: Tensor: seq_len x batch_size x input feature
 
         input_proj = self.input_proj(event)
+        input_proj = self.layernorm(input_proj)
+        input_proj = self.act(input_proj)
 
         # first decoder call initialize sample mask
         if z is None:

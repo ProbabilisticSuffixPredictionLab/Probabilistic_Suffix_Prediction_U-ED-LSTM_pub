@@ -104,12 +104,10 @@ class CSV2EventLog(RawDataFrameLoader):
         if self.seconds_in_day_column:
             self.__create_seconds_in_day_column()
             
-        # raw dataframe befor split containing categorical and continuous attributes
+        # raw dataframe befor split containing categorical and continuous attributes: Reduced to only the selected attributes
         self.raw_df = self.create_case_level_dataframe(self.df.copy())
         
-        # Add EOS to every case
-        self.df = self.df.groupby(self.case_name, group_keys=False).apply(
-            lambda group : self.__add_last_rows(group)).reset_index(drop=True)
+        self.df = self.df.groupby(self.case_name, group_keys=False).apply(lambda group : self.__add_last_rows(group)).reset_index(drop=True)
 
         for categorical_col in self.categorical_columns:
             self.df[categorical_col] = self.df[categorical_col].apply(lambda x: x if pd.isna(x) else str(x))
@@ -154,6 +152,7 @@ class CSV2EventLog(RawDataFrameLoader):
             self.df[self.timestamp_name].dt.minute * 60 + \
             self.df[self.timestamp_name].dt.second
 
+    # Add EOS to the 
     def __add_last_rows(self, group):
         new_row = {}
         for col in group.columns:
@@ -162,13 +161,14 @@ class CSV2EventLog(RawDataFrameLoader):
             elif group[col].dtype == 'object' or group[col].dtype.name == 'category':
                 new_row[col] = 'EOS'
 
-        # Explain more in detail
-        max_case_len = ((len(group) + self.min_suffix_size-1) -len(group))
-        
+        # Adds everywhere min_suffix_size
+        max_case_len = self.min_suffix_size
+        # Adds new rows with EOS:
         eos_rows = pd.DataFrame(max_case_len * [new_row])
+        # concat standard dataframe 
         concat_case = pd.concat([group.sort_values(by=self.timestamp_name), eos_rows])
         return concat_case
-
+    
 #  split dataframes 
 class EventLogSplitter:
     def __init__(self,
@@ -195,126 +195,6 @@ class EventLogSplitter:
         test_validation_df = event_log.df[event_log.df[event_log.case_name].isin(test_validation_cases)]
 
         return train_df, train_validation_df, test_validation_df
-
-# class that provides intermediate steps: create dataframe of prefixes for marking determination:
-class PrefixesDataFrameLoader:
-    def __init__(self, event_log_location: str, event_log_properties: Dict[str, Any]):
-        if not event_log_properties:
-            raise ValueError("event_log_properties are required")
-
-        self.case_name = event_log_properties['case_name']
-        self.min_suffix_size = event_log_properties.get('min_suffix_size', 1)
-        self.window_size_setting = event_log_properties.get('window_size', 'auto')
-
-        self.categorical_columns = list(event_log_properties.get('categorical_columns') or [])
-        self.continuous_columns = list(event_log_properties.get('continuous_columns') or [])
-        self.continuous_positive_columns = list(event_log_properties.get('continuous_positive_columns') or [])
-        
-        self.static_categorical_columns = list(event_log_properties.get('static_categorical_columns') or [])
-        self.static_continuous_columns = list(event_log_properties.get('static_continuous_columns') or [])
-
-        # create processed event log with EOS rows and engineered columns
-        self.csv2event_log = CSV2EventLog(event_log_location, **event_log_properties)
-        self.event_log = self.csv2event_log.df.copy()
-
-        # configure window size so we can trim sequences later on
-        self.window_size = self._resolve_window_size()
-
-        # splitting initialization
-        train_size = event_log_properties.get('train_validation_size', 0.1)
-        test_size = event_log_properties.get('test_validation_size', 0.1)
-        splitter = EventLogSplitter(train_validation_size=train_size, test_validation_size=test_size)
-        train_df, val_df, test_df = splitter.split(self.csv2event_log)
-
-        
-        self.processed_splits: Dict[str, pd.DataFrame] = {'train': train_df.reset_index(drop=True).copy(),
-                                                          'val': val_df.reset_index(drop=True).copy(),
-                                                          'test': test_df.reset_index(drop=True).copy()}
-        self.train_df = self.processed_splits['train']
-        self.val_df = self.processed_splits['val']
-        self.test_df = self.processed_splits['test']
-
-    def get_raw_dataframe(self) -> pd.DataFrame:
-        # return self.csv2event_log.raw_df.copy()
-        return self.csv2event_log.raw_df.copy()
-        
-    def _resolve_window_size(self) -> int:
-        setting = self.window_size_setting if self.window_size_setting is not None else 'auto'
-        if isinstance(setting, str) and setting.lower() == 'auto':
-            case_sizes = self.event_log.groupby(self.case_name).size()
-            if case_sizes.empty:
-                return self.min_suffix_size
-            auto_window = round(case_sizes.quantile(1 - 0.015)) + self.min_suffix_size
-            return max(self.min_suffix_size, int(auto_window))
-        return int(setting)
-
-    @staticmethod
-    def _extract_static_value(series: pd.Series) -> object:
-        cleaned = series.dropna()
-        if cleaned.empty:
-            return np.nan
-        cleaned = cleaned[cleaned != 'EOS']
-        if cleaned.empty:
-            return np.nan
-        return cleaned.iloc[0]
-
-    def _limit_sequence(self, values):
-        seq = list(values)
-        if len(seq) <= self.window_size:
-            return seq
-        return seq[-self.window_size:]
-
-    def transform(self, df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-        
-        working_df = self.event_log if df is None else df
-    
-        rows = []
-        grouped = working_df.groupby(self.case_name, sort=False)
-        for case_id, group in grouped:
-            # case
-            group = group.reset_index(drop=True)
-            total_len = len(group)
-            
-            # check if correct
-            for prefix_len in range(self.min_suffix_size+1, total_len+1):
-                row = {self.case_name: case_id,
-                       'prefix_length': prefix_len - self.min_suffix_size}
-                # cat
-                for col in self.categorical_columns:
-                    if col in group.columns:
-                        values = group[col].iloc[:prefix_len - self.min_suffix_size].tolist()
-                    else:
-                        values = []
-                    row[col] = self._limit_sequence(values)
-                # con
-                for col in self.continuous_columns + self.continuous_positive_columns:
-                    if col in group.columns:
-                        values = group[col].iloc[:prefix_len - self.min_suffix_size].tolist()
-                    else:
-                        values = []
-                    row[col] = self._limit_sequence(values)
-                # static
-                for col in self.static_categorical_columns:
-                    if col in group.columns:
-                        row[col] = self._extract_static_value(group[col])
-                    else:
-                        row[col] = np.nan
-                for col in self.static_continuous_columns:
-                    if col in group.columns:
-                        row[col] = self._extract_static_value(group[col])
-                    else:
-                        row[col] = np.nan
-                rows.append(row)
-        return pd.DataFrame(rows)
-
-    def get_dataset(self, type : str):
-        if type == 'train':
-            df = self.transform(df=self.train_df)
-        elif type == 'val':
-            df = self.transform(df=self.val_df)
-        elif type == 'test':
-            df = self.transform(df=self.test_df)
-        return df
 
 # standardization for log-normal             
 class PositiveStandardizer_normed(BaseEstimator, TransformerMixin):
@@ -436,6 +316,7 @@ class TensorEncoderDecoder:
         case_values_enc_pad = self.pad_to_window_size(case_values_enc)
         return torch.tensor(np.array(case_values_enc_pad, dtype=float), dtype=torch.float).squeeze(-1).unsqueeze(0)
 
+    # Encode single case
     def encode_case(self,
                     df_case : pd.DataFrame) -> tuple[tuple[torch.Tensor], tuple[torch.Tensor]]:
         categorical_tensors = []
@@ -448,9 +329,8 @@ class TensorEncoderDecoder:
             continuous_tensors.append(cont_columns)
         return tuple(categorical_tensors), tuple(continuous_tensors)
 
-    def encode_df(self, df) -> tuple[dict[str, object],
-                                     tuple[list[tuple[str, int, dict[str, int]]]],
-                                     tuple[list[tuple[str, int, dict[str, int]]]]]:
+    # Encode full dataframe
+    def encode_df(self, df) -> tuple[dict[str, object], tuple[list[tuple[str, int, dict[str, int]]]], tuple[list[tuple[str, int, dict[str, int]]]]]:
         categorical_tensors = []
         all_categories = [[], []]
         static_categories = [[], []]
@@ -488,15 +368,13 @@ class TensorEncoderDecoder:
 
         static_cat_tensor, static_cont_tensor = self._encode_static_attributes(df, case_ids)
 
-        tensor_bundle = {
-            'categorical': categorical_tensors,
-            'continuous': continuous_tensors,
-            'eos_padding': eos_padding_tensor,
-            'zero_padding': zero_padding_tensor,
-            'case_ids': tuple(case_ids),
-            'static_categorical': static_cat_tensor,
-            'static_continuous': static_cont_tensor
-        }
+        tensor_bundle = {'categorical': categorical_tensors,
+                         'continuous': continuous_tensors,
+                         'eos_padding': eos_padding_tensor,
+                         'zero_padding': zero_padding_tensor,
+                         'case_ids': tuple(case_ids),
+                         'static_categorical': static_cat_tensor,
+                         'static_continuous': static_cont_tensor}
 
         return tensor_bundle, tuple(all_categories), tuple(static_categories)
 
@@ -514,8 +392,11 @@ class TensorEncoderDecoder:
             case_values = np.array(group[[col]], dtype=object)
             case_values_enc = self.categorical_encoders[col].transform(case_values) + 1  # shape (n,1)
             padded_encodings = []
-            for prefix_len in range(self.min_suffix_size + 1, len(case_values_enc) + 1):
+            
+            for prefix_len in range(self.min_suffix_size +1, len(case_values_enc) + 1):
+                
                 padded_slice = self.pad_to_window_size(case_values_enc[:prefix_len])
+            
                 padded_encodings.append(padded_slice)
                 if return_case_ids_and_eos_paddings:
                     case_ids.append(case_id)
@@ -568,6 +449,8 @@ class TensorEncoderDecoder:
             # check
             for prefix_len in range(self.min_suffix_size + 1, len(case_values_enc) + 1):
                 padded_encodings.append(self.pad_to_window_size(case_values_enc[:prefix_len]))
+            
+            
             windows.extend(padded_encodings)
         
         if len(windows) == 0:
@@ -578,10 +461,6 @@ class TensorEncoderDecoder:
         return t.squeeze(-1)
     
     def pad_to_window_size(self, previous_values):
-        """
-        previous_values: array-like with shape (k, 1)
-        returns list of shape (window_size, 1)
-        """
         prev_list = np.asarray(previous_values).tolist()
         if len(prev_list) > self.window_size:
             return prev_list[-self.window_size:]
@@ -664,6 +543,7 @@ class TensorEncoderDecoder:
             return np.nan
         return cleaned.iloc[0]
 
+    #
     def decode_event(self, event_tuple : tuple):
         cat, cont, *_, case_id = event_tuple
         decoded_event = dict()
@@ -701,13 +581,168 @@ class TensorEncoderDecoder:
     
     def __get_continuous_positive_encoder(self):
         standardizer = PositiveStandardizer_normed()
-        return standardizer 
+        return standardizer
+    
+# class that provides intermediate steps: create dataframe of prefixes for marking determination:
+class PrefixesDataFrameLoader:
+    def __init__(self, event_log_location: str, event_log_properties: Dict[str, Any]):
+        if not event_log_properties:
+            raise ValueError("event_log_properties are required")
+        self.event_log_properties = event_log_properties
+
+        self.case_name = event_log_properties['case_name']
+        self.min_suffix_size = event_log_properties.get('min_suffix_size', 1)
+        self.window_size_setting = event_log_properties.get('window_size', 'auto')
+
+        self.categorical_columns = list(event_log_properties.get('categorical_columns') or [])
+        self.continuous_columns = list(event_log_properties.get('continuous_columns') or [])
+        self.continuous_positive_columns = list(event_log_properties.get('continuous_positive_columns') or [])
+        
+        self.static_categorical_columns = list(event_log_properties.get('static_categorical_columns') or [])
+        self.static_continuous_columns = list(event_log_properties.get('static_continuous_columns') or [])
+
+        # create processed event log with EOS rows and engineered columns
+        self.csv2event_log = CSV2EventLog(event_log_location, **event_log_properties)
+        # dataframe from CSV2EventLog
+        self.event_log = self.csv2event_log.df.copy()
+
+        # configure window size so we can trim sequences later on
+        self.window_size = self._resolve_window_size()
+
+        # splitting initialization
+        train_size = event_log_properties.get('train_validation_size')
+        test_size = event_log_properties.get('test_validation_size')
+        splitter = EventLogSplitter(train_validation_size=train_size, test_validation_size=test_size)
+        
+        train_df, val_df, test_df = splitter.split(self.csv2event_log)
+        
+        self.processed_splits: Dict[str, pd.DataFrame] = {'train': train_df.reset_index(drop=True).copy(),
+                                                          'val': val_df.reset_index(drop=True).copy(),
+                                                          'test': test_df.reset_index(drop=True).copy()}
+        self.train_df = self.processed_splits['train']
+        self.val_df = self.processed_splits['val']
+        self.test_df = self.processed_splits['test']
+
+    # Return Raw full dataframe: dynamic as lists, static as values
+    def get_raw_dataframe(self) -> pd.DataFrame:
+        return self.csv2event_log.raw_df.copy()
+        
+    def _resolve_window_size(self) -> int:
+        setting = self.window_size_setting if self.window_size_setting is not None else 'auto'
+        if isinstance(setting, str) and setting.lower() == 'auto':
+            case_sizes = self.event_log.groupby(self.case_name).size()
+            if case_sizes.empty:
+                return self.min_suffix_size
+            auto_window = round(case_sizes.quantile(1 - 0.015)) + self.min_suffix_size
+            return max(self.min_suffix_size, int(auto_window))
+        return int(setting)
+
+    @staticmethod
+    def _extract_static_value(series: pd.Series) -> object:
+        cleaned = series.dropna()
+        if cleaned.empty:
+            return np.nan
+        cleaned = cleaned[cleaned != 'EOS']
+        if cleaned.empty:
+            return np.nan
+        return cleaned.iloc[0]
+
+    def _limit_sequence(self, values):
+        seq = list(values)
+        if len(seq) <= self.window_size:
+            return seq
+        return seq[-self.window_size:]
+
+    def transform(self, df: Optional[pd.DataFrame] = None, with_eos:Optional[bool]=False) -> pd.DataFrame:
+        #
+        working_df = self.event_log if df is None else df
+        #
+        rows = []
+        grouped = working_df.groupby(self.case_name, sort=False)
+        for case_id, group in grouped:
+            group = group.reset_index(drop=True)
+            
+            # length: get all rows case length + eos rows: min suffix size
+            total_len = len(group)
+            max_prefix_len = total_len - self.min_suffix_size
+            
+            # Iterate through the
+            for prefix_len in range(1, max_prefix_len +1):
+                row = {self.case_name: case_id,'prefix_length': prefix_len}
+                # categorical
+                for col in self.categorical_columns:
+                    values = group[col].iloc[:prefix_len].tolist() if col in group.columns else []
+                    row[col] = self._limit_sequence(values)
+
+                # continuous
+                for col in self.continuous_columns + self.continuous_positive_columns:
+                    values = group[col].iloc[:prefix_len].tolist() if col in group.columns else []
+                    row[col] = self._limit_sequence(values)
+
+                # static
+                for col in self.static_categorical_columns:
+                    row[col] = self._extract_static_value(group[col]) if col in group.columns else np.nan
+
+                for col in self.static_continuous_columns:
+                    row[col] = self._extract_static_value(group[col]) if col in group.columns else np.nan
+
+                rows.append(row)
+        return pd.DataFrame(rows)
+
+    # Return dataframe transformed 
+    def get_dataset(self, type : str):
+        if type == 'train':
+            df = self.transform(df=self.train_df)
+        elif type == 'val':
+            df = self.transform(df=self.val_df)
+        elif type == 'test':
+            df = self.transform(df=self.test_df)
+        return df
+    
+    def get_all_datasets(self):
+        return self.train_df, self.val_df, self.test_df
+
+    def extract_feature_info(self):
+        categories_info = {}
+        ranges_info = {}
+        
+        # Get all unique categories for each categorical column
+        categorical_columns = self.event_log_properties.get('categorical_columns', [])
+        for col in categorical_columns:
+            if col in self.event_log.columns:
+                # Get all unique values (excluding NaN)
+                unique_values = self.event_log[col].dropna().unique()
+                # Convert to list and sort for consistency
+                categories_info[col] = sorted([str(val) for val in unique_values if pd.notna(val)])
+            else:
+                categories_info[col] = []
+        
+        # Get min/max ranges for each continuous column
+        continuous_columns = self.event_log_properties .get('continuous_columns', []) + self.event_log_properties .get('continuous_positive_columns', [])
+        for col in continuous_columns:
+            if col in self.event_log.columns:
+                # Get non-null values
+                col_data = self.event_log[col].dropna()
+                if len(col_data) > 0:
+                    ranges_info[col] = {
+                        'min': float(col_data.min()),
+                        'max': float(col_data.max()),
+                        'mean': float(col_data.mean()),
+                        'std': float(col_data.std())
+                    }
+                else:
+                    ranges_info[col] = {'min': 0.0, 'max': 0.0, 'mean': 0.0, 'std': 0.0}
+            else:
+                ranges_info[col] = {'min': 0.0, 'max': 0.0, 'mean': 0.0, 'std': 0.0}
+        return {'categorical': categories_info, 'continuous': ranges_info}
 
 # create event log
 class EventLogLoader:
-    def __init__(self, event_log_location, event_log_properties, prefix_df: Optional[PrefixesDataFrameLoader]=None):
-        if prefix_df:
+    def __init__(self, event_log_location, event_log_properties, prefix_df: PrefixesDataFrameLoader=None):
+        if prefix_df is not None:
+            # event log 
             self.event_log = prefix_df.csv2event_log
+            # 
             self.train_df = prefix_df.train_df.copy()
             self.val_df = prefix_df.val_df.copy()
             self.test_df = prefix_df.test_df.copy()
@@ -719,7 +754,20 @@ class EventLogLoader:
         self.encoder_decoder = TensorEncoderDecoder(self.train_df, **event_log_properties)
         # Data are transformed
         self.encoder_decoder.train_imputers_encoders()
-                    
+        
+    # get encoded dataframe
+    def get_encoded_dataframe(self, type : str):
+        if type == 'train':
+            df = self.train_df
+        elif type == 'val':
+            df = self.val_df
+        elif type == 'test':
+            df = self.test_df
+        else:
+            raise ValueError("type must be one of 'train', 'val', or 'test'")
+        return df
+                     
+    # get encoded data as tensors
     def get_dataset(self, type : str):
         if type == 'train':
             df = self.train_df
@@ -801,50 +849,3 @@ class EventLogDataset(Dataset):
             elif isinstance(marking, np.ndarray):
                 marking = marking.tolist()
             self.prefixes_petri_net_marking[idx] = marking
-
-
-# class for pre-processing the data for perturnbation:
-class EventLogPerturbationPreprocess:
-    def __init__(self, event_log_location, event_log_properties):
-        self.event_log_properties = event_log_properties
-        
-        self.event_log = CSV2EventLog(event_log_location, **event_log_properties) 
-        splitter = EventLogSplitter(**event_log_properties)
-        self.train_df, self.val_df, self.test_df = splitter.split(self.event_log)
-
-    def get_all_datasets(self):
-        return self.train_df, self.val_df, self.test_df
-
-    def extract_feature_info(self):
-        categories_info = {}
-        ranges_info = {}
-        
-        # Get all unique categories for each categorical column
-        categorical_columns = self.event_log_properties.get('categorical_columns', [])
-        for col in categorical_columns:
-            if col in self.event_log.df.columns:
-                # Get all unique values (excluding NaN)
-                unique_values = self.event_log.df[col].dropna().unique()
-                # Convert to list and sort for consistency
-                categories_info[col] = sorted([str(val) for val in unique_values if pd.notna(val)])
-            else:
-                categories_info[col] = []
-        
-        # Get min/max ranges for each continuous column
-        continuous_columns = self.event_log_properties .get('continuous_columns', []) + self.event_log_properties .get('continuous_positive_columns', [])
-        for col in continuous_columns:
-            if col in self.event_log.df.columns:
-                # Get non-null values
-                col_data = self.event_log.df[col].dropna()
-                if len(col_data) > 0:
-                    ranges_info[col] = {
-                        'min': float(col_data.min()),
-                        'max': float(col_data.max()),
-                        'mean': float(col_data.mean()),
-                        'std': float(col_data.std())
-                    }
-                else:
-                    ranges_info[col] = {'min': 0.0, 'max': 0.0, 'mean': 0.0, 'std': 0.0}
-            else:
-                ranges_info[col] = {'min': 0.0, 'max': 0.0, 'mean': 0.0, 'std': 0.0}
-        return {'categorical': categories_info, 'continuous': ranges_info}

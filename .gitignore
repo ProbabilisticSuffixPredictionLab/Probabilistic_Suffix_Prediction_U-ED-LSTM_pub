@@ -209,5 +209,9 @@ pyrightconfig.json
 # .pkl in reimplemented approaches
 src/reimplemented_comparable_approaches/**/notebooks/evaluation/**/*.pkl
 
+data_information
+
+encoded_data_v2/*
+
 # End of https://www.toptal.com/developers/gitignore/api/visualstudiocode,python,jupyternotebooks
 
