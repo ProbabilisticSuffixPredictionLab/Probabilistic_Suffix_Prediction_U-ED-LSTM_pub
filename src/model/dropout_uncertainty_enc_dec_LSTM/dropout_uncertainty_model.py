@@ -119,6 +119,7 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
                 static_embedding_size = sum([embedding.embedding_dim for embedding in self.embeddings_static_enc])
                 print("Static encoder categorical embeddings: ", self.embeddings_static_enc)
             else:
+                self.embeddings_static_enc = None
                 static_embedding_size = 0
             print("Total embedding feature size encoder (static): ", static_embedding_size)
                 
