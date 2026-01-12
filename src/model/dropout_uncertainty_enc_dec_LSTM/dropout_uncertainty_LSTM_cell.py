@@ -1,7 +1,6 @@
 """
 LSTM cells using dropout as a Bayesian approximation.
 """
-
 # performance imports for torch: torch kernel uses one core only.
 import os
 os.environ["OMP_NUM_THREADS"] = "1"

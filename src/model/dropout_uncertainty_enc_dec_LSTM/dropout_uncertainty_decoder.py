@@ -1,8 +1,13 @@
 """
 Decoder consisting of two an two-layerd LSTM with LSTM cells using dropout as a Bayesian approximation.
 """
-
 from .dropout_uncertainty_LSTM_cell import DropoutUncertaintyLSTMCell
+
+# performance imports for torch: torch kernel uses one core only.
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["TORCH_NUM_THREADS"] = "1" 
 
 import torch
 from torch import nn, Tensor

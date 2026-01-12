@@ -1,11 +1,14 @@
-"""
-SMALL DESCRIPTION
-"""
-
 from .evaluation import Evaluation
 
 import concurrent.futures
 import random
+
+# performance imports for torch: torch kernel uses one core only.
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["TORCH_NUM_THREADS"] = "1" 
+
 import torch
 import torch.nn.functional as F
 from tqdm.notebook import tqdm
@@ -190,17 +193,24 @@ class ProbabilisticEvaluation(Evaluation):
         predicted_suffixes = self.predict_probabilistic_suffix(prefix, prefix_len, statics, mask, include_model_states)
         
         # print the cases prefixes: Activity only
+        # Helpdesk
         # print(case_name)
         # print(prefix_len)
         # print("prefix:", [prefix['Activity'] for prefix in readable_prefix])
         # print("target suffix: ",  [suffix['Activity'] for suffix in readable_suffix])
         # print("most likely", [suffix['Activity'] for suffix in mean_prediction])
 
+        # Else
+        # print(case_name)
+        # print(prefix_len)
+        # print("prefix:", [prefix['concept:name'] for prefix in readable_prefix])
+        # print("target suffix: ",  [suffix['concept:name'] for suffix in readable_suffix])
+        # print("most likely", [suffix['concept:name'] for suffix in mean_prediction])
+
         return case_name, prefix_len, readable_prefix, predicted_suffixes, readable_suffix, mean_prediction
     
-    
-    # Evaluate methods 
-                    
+
+    # Evaluate methods                     
     # 
     def evaluate(self, random_order=False, include_model_states=False):
         #compiled_evaluate_single = torch.compile(self._evaluate_single)

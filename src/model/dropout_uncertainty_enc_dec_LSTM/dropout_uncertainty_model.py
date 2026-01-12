@@ -36,10 +36,13 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         
         ARGS:
         - data_set_categories: Event attributes, name and size
+        
         - enc_feat: Event attributes used by encoder as input
         - dec_feat Event attributes used by decoder as input and output
+        
         - num_layers: Number of hidden layers in both Encoder and Decoder
         - dropout: Dropout probability
+        
         - static_data_set_categories
         - static_enc_feat
         """
@@ -462,7 +465,6 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
                 
         return last_event
     
-    
     # During test time:
     def inference(self,
                   # dynamic event attributes for encoder
@@ -479,10 +481,10 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
         
         INPUTS:
         - prefix: Input sequence of the model to be analyzed by encoder. (Set param only for the first model call)
+        - static_inputs: Optional static attribute tensor(s) to merge with the latent space when encoding a prefix. Expected format: (static_cat_tensor, static_num_tensor) or a pre-projected tensor.
         - mask: Zero padding mask for prefix.
         - last_event: Last event which was the output of the decoder. (Set param only after the first model call) 
         - hx: Last hidden state which was the output of the decoder. (Set param only for the first model call) 
-        - static_inputs: Optional static attribute tensor(s) to merge with the latent space when encoding a prefix. Expected format: (static_cat_tensor, static_num_tensor) or a pre-projected tensor.
         
         OUTPUTS:
         - predictions: Predicted outcome. [categorical dict (key: feature name, value tensor), numerical dict (key: feature name, value tensor)]
@@ -511,7 +513,9 @@ class DropoutUncertaintyEncoderDecoderLSTM(nn.Module):
                 (h, c) = hx
                 preds, (h, c), _ = self.decoder(input=last_event, hx=(h, c), z=z, pred=True)
                 return preds, (h, c)
-                
+    
+    # save and load the trained models          
+    # 
     def save(self, path : str):
         """
         Store the trained model at path.

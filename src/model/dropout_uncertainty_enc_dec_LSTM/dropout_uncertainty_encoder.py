@@ -1,7 +1,6 @@
 """
 Encoder consisting of two an two-layerd LSTM with LSTM cells using dropout as a Bayesian approximation.
 """
-
 from .dropout_uncertainty_LSTM_cell import DropoutUncertaintyLSTMCell
 
 # performance imports for torch: torch kernel uses one core only.
@@ -207,6 +206,9 @@ class DropoutUncertaintyLSTMEncoder(nn.Module):
         merged_static_nums = None
         if static_nums is not None:
             if isinstance(static_nums, Tensor):
+                # bring to size (features x B)
+                if static_nums.dim() == 1:
+                    static_nums = static_nums.unsqueeze(0)
                 merged_static_nums = static_nums
             else:
                 merged_static_nums = torch.cat([num.unsqueeze(1) for num in static_nums], dim=-1)

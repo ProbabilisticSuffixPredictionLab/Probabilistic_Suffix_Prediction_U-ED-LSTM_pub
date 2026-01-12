@@ -13,10 +13,10 @@ numpy = "*"
 torch = "*"
 scikit-learn = "*"
 python-levenshtein = "*"
-tensorboard = "*"
 standard-imghdr = "*"
 pyxdameraulevenshtein = "*"
 crps = "*"
+tensorboard = "*"
 
 [dev-packages]
 torch-tb-profiler = "*"
