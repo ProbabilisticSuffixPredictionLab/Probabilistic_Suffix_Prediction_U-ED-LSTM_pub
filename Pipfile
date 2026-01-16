@@ -17,6 +17,7 @@ standard-imghdr = "*"
 pyxdameraulevenshtein = "*"
 crps = "*"
 tensorboard = "*"
+seaborn = "*"
 
 [dev-packages]
 torch-tb-profiler = "*"

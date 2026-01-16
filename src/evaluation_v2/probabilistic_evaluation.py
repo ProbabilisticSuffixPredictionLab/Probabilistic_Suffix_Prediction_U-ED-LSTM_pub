@@ -210,6 +210,7 @@ class ProbabilisticEvaluation(Evaluation):
         return case_name, prefix_len, readable_prefix, predicted_suffixes, readable_suffix, mean_prediction
     
 
+
     # Evaluate methods                     
     # 
     def evaluate(self, random_order=False, include_model_states=False):

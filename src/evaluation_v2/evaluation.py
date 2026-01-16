@@ -70,13 +70,7 @@ class Evaluation:
         # static attributes
         static_atts = self._prepare_static_inputs(static_cats, static_nums)
         
-        prefix_length = 0
-        # Iterate over the sequence logic
-        #
-        # Check
-        #
-        #
-         
+        prefix_length = 0         
         for i in range(categorical_tensors[self.concept_name_id].shape[0] - self.dataset.min_suffix_size -1 ):
             # categorical updates
             for j in range(len(current_prefix[0])):
