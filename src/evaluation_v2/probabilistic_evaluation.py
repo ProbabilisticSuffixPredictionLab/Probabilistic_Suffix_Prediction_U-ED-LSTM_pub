@@ -349,7 +349,7 @@ class ProbabilisticEvaluation(Evaluation):
             case_items = random.sample(case_items, len(case_items))
         max_in_flight = self.num_processes
         futures = []
-        # multiprocessing.set_start_method('spawn', force=True)
+        multiprocessing.set_start_method('spawn', force=True)
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=self.num_processes
         ) as executor:
