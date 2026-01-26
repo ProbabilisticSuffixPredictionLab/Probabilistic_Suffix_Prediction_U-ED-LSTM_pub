@@ -1,8 +1,5 @@
 from .evaluation import Evaluation
 
-import concurrent.futures
-import random
-
 # performance imports for torch: torch kernel uses one core only.
 import os
 
@@ -13,7 +10,9 @@ os.environ["TORCH_NUM_THREADS"] = "1"
 import torch
 import torch.nn.functional as F
 from tqdm.notebook import tqdm
-
+import multiprocessing
+import concurrent.futures
+import random
 
 class ProbabilisticEvaluation(Evaluation):
     def __init__(
