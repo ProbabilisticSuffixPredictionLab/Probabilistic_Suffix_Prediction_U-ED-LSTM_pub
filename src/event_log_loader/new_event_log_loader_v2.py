@@ -396,6 +396,15 @@ class TensorEncoderDecoder:
         torch.Tensor,
         torch.Tensor,
     ]:
+        # Ensure all expected columns exist; missing ones default to NaN so imputers/encoders can handle them.
+        df_case = df_case.copy()
+        for col in self.categorical_columns:
+            if col not in df_case:
+                df_case[col] = np.nan
+        for col in self.continuous_columns + self.continuous_positive_columns:
+            if col not in df_case:
+                df_case[col] = np.nan
+
         categorical_tensors = []
         continuous_tensors = []
         for col in self.categorical_columns:
