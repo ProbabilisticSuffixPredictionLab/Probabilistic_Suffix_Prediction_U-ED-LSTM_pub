@@ -1,18 +1,22 @@
-import pandas as pd
-import numpy as np
 from functools import partial
+from typing import Any, Dict, Iterable, Optional
+
+import numpy as np
+import pandas as pd
 import sklearn
 import sklearn.preprocessing
-from sklearn.impute import SimpleImputer
 import torch
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.impute import SimpleImputer
 from torch.utils.data import Dataset
 from tqdm.notebook import tqdm
-from typing import Optional, Dict, Any, Iterable
-from sklearn.base import BaseEstimator, TransformerMixin
 
 
-# raw dataframe of whole event log: creates a dataframe with dynamic attributes as lists and static as value
 class RawDataFrameLoader:
+    """
+    Base class for loading raw event log data into a DataFrame.
+    """
+
     def __init__(
         self,
         event_log_dir: str,
@@ -31,7 +35,9 @@ class RawDataFrameLoader:
         min_suffix_size: int = 1,
         **kwargs,
     ):
-
+        """
+        Initialize the raw data frame loader.
+        """
         self.df = pd.read_csv(event_log_dir)
 
         self.case_name = case_name
@@ -60,6 +66,9 @@ class RawDataFrameLoader:
 
     @staticmethod
     def __extract_static_value(series: pd.Series) -> object:
+        """
+        Extract a static value from a series, ignoring NaNs and "EOS" values.
+        """
         cleaned = series.dropna()
         if cleaned.empty:
             return np.nan
@@ -70,6 +79,9 @@ class RawDataFrameLoader:
         return cleaned.iloc[0]
 
     def create_case_level_dataframe(self, event_level_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Create a case-level dataframe from the event-level dataframe.
+        """
         grouped = event_level_df.groupby(self.case_name, sort=False)
         records = []
         for case_id, group in grouped:
@@ -93,7 +105,14 @@ class RawDataFrameLoader:
 
 # base object for the dataset creation
 class CSV2EventLog(RawDataFrameLoader):
+    """
+    Base class for loading event logs from CSV files.
+    """
+
     def __init__(self, *args, **kwargs):
+        """
+        Initialize the event log loader with additional processing.
+        """
         # load raw constructor
         super().__init__(*args, **kwargs)
 
@@ -114,7 +133,8 @@ class CSV2EventLog(RawDataFrameLoader):
         if self.seconds_in_day_column:
             self.__create_seconds_in_day_column()
 
-        # raw dataframe befor split containing categorical and continuous attributes: Reduced to only the selected attributes
+        # raw dataframe befor split containing categorical and continuous attributes:
+        # Reduced to only the selected attributes
         self.raw_df = self.create_case_level_dataframe(self.df.copy())
 
         self.df = (
@@ -135,6 +155,9 @@ class CSV2EventLog(RawDataFrameLoader):
             self.df[continuous_col] = self.df[continuous_col].astype("float32")
 
     def __create_time_since_case_start_column(self):
+        """
+        Create a new column representing the time since the case started.
+        """
         case_start_times = self.df.groupby(self.case_name)[
             self.timestamp_name
         ].transform("min")
@@ -145,8 +168,11 @@ class CSV2EventLog(RawDataFrameLoader):
 
     @staticmethod
     def __min_timestamp_before_event(group, timestamp_name, new_column_name):
+        """
+        Find the minimum timestamp before each event in the group.
+        """
         min_values = []
-        for i, row in group.iterrows():
+        for _i, row in group.iterrows():
             before_values = group[(group[timestamp_name] < row[timestamp_name])][
                 timestamp_name
             ]
@@ -158,6 +184,9 @@ class CSV2EventLog(RawDataFrameLoader):
         return group
 
     def __create_time_since_last_event_column(self):
+        """
+        Create a new column representing the time since the last event.
+        """
         min_timestamp_before = partial(
             CSV2EventLog.__min_timestamp_before_event,
             timestamp_name=self.timestamp_name,
@@ -173,17 +202,30 @@ class CSV2EventLog(RawDataFrameLoader):
         ).dt.total_seconds()
 
     def __create_day_in_week_column(self):
+        """
+        Create a new column representing the day of the week.
+
+        0 = Monday, 6 = Sunday
+        """
         self.df[self.day_in_week_column] = self.df[self.timestamp_name].dt.weekday
 
     def __create_seconds_in_day_column(self):
+        """
+        Create a new column.
+
+        The column representing the number of seconds elapsed since
+        the start of the day.
+        """
         self.df[self.seconds_in_day_column] = (
             self.df[self.timestamp_name].dt.hour * 3600
             + self.df[self.timestamp_name].dt.minute * 60
             + self.df[self.timestamp_name].dt.second
         )
 
-    # Add EOS to the
     def __add_last_rows(self, group):
+        """
+        Adds EOS rows to each case in the event log dataframe.
+        """
         new_row = {}
         for col in group.columns:
             if col == self.case_name:
@@ -202,13 +244,23 @@ class CSV2EventLog(RawDataFrameLoader):
 
 #  split dataframes
 class EventLogSplitter:
+    """
+    Split event log into train, train_validation, and test_validation sets.
+    """
+
     def __init__(
         self, train_validation_size: float, test_validation_size: float, **kwargs
     ):
+        """
+        Initialize the splitter with train/validation and test/validation sizes.
+        """
         self.train_validation_size = train_validation_size
         self.test_validation_size = test_validation_size
 
     def split(self, event_log: CSV2EventLog):
+        """
+        Split the event log into train, train_validation, and test_validation sets.
+        """
         cases = event_log.df[event_log.case_name].unique()
         np.random.shuffle(cases)
 
@@ -239,10 +291,16 @@ class PositiveStandardizer_normed(BaseEstimator, TransformerMixin):
     """
 
     def __init__(self):
+        """
+        Initialize the standardizer.
+        """
         self.mean_ = None
         self.std_ = None
 
     def fit(self, X, y=None):
+        """
+        Fit the standardizer by computing mean and std of log-transformed data.
+        """
         print("Positive Standardization")
         log_x = np.log1p(X)
         print("min,25%,50%,75%,max:", np.percentile(log_x, [0, 25, 50, 75, 100]))
@@ -254,12 +312,18 @@ class PositiveStandardizer_normed(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
+        """
+        Transform the data by applying log transformation and standardization.
+        """
         # log the observations to assume normal PDF
         log_x = np.log1p(X)
         x_enc = (log_x - self.mean_) / self.std_
         return x_enc
 
     def inverse_transform(self, X_enc):
+        """
+        Inverse transform the encoded data back to the original scale.
+        """
         # Destandardization
         log_x = X_enc * self.std_ + self.mean_
         # Exponentiation:
@@ -269,6 +333,10 @@ class PositiveStandardizer_normed(BaseEstimator, TransformerMixin):
 
 # responsible for tensor encoding of event log data
 class TensorEncoderDecoder:
+    """
+    Responsible for tensor encoding of event log data.
+    """
+
     def __init__(
         self,
         event_log: pd.DataFrame,
@@ -283,7 +351,9 @@ class TensorEncoderDecoder:
         static_continuous_columns: Optional[list[str]] = None,
         **kwargs,
     ):
-
+        """
+        Initialize the encoder/decoder with the event log and parameters.
+        """
         self.event_log = event_log
         self.case_name = case_name
         self.concept_name = concept_name
@@ -303,10 +373,8 @@ class TensorEncoderDecoder:
         self.static_categorical_columns = list(static_categorical_columns or [])
         self.static_continuous_columns = list(static_continuous_columns or [])
 
-        self.categorical_imputers: dict[str, SimpleImputer] = dict()
-        self.categorical_encoders: dict[str, sklearn.preprocessing.OrdinalEncoder] = (
-            dict()
-        )
+        self.categorical_imputers: dict[str, SimpleImputer] = {}
+        self.categorical_encoders: dict[str, sklearn.preprocessing.OrdinalEncoder] = {}
         for categorical_column in (
             self.categorical_columns + self.static_categorical_columns
         ):
@@ -315,10 +383,8 @@ class TensorEncoderDecoder:
                     self.__get_categorical_encoder()
                 )
 
-        self.continuous_imputers = dict()
-        self.continuous_encoders: dict[str, sklearn.preprocessing.StandardScaler] = (
-            dict()
-        )
+        self.continuous_imputers = {}
+        self.continuous_encoders: dict[str, sklearn.preprocessing.StandardScaler] = {}
 
         # Normal encoding
         for continuous_column in (
@@ -341,6 +407,9 @@ class TensorEncoderDecoder:
             )
 
     def train_imputers_encoders(self):
+        """
+        Train all imputers and encoders on the event log data.
+        """
         # categorical encoders: fit on 2D numpy arrays with dtype=object
         for col, categorical_encoder in self.categorical_encoders.items():
             column_series = self.event_log[col].astype(object)
@@ -389,14 +458,21 @@ class TensorEncoderDecoder:
         )
 
     # Encode single case
-    def encode_case(self, df_case: pd.DataFrame) -> tuple[
+    def encode_case(
+        self, df_case: pd.DataFrame
+    ) -> tuple[
         tuple[torch.Tensor],
         tuple[torch.Tensor],
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
     ]:
-        # Ensure all expected columns exist; missing ones default to NaN so imputers/encoders can handle them.
+        """
+        Encode a single case dataframe into tensors.
+
+        Ensure all expected columns exist; missing ones default to NaN
+        so imputers/encoders can handle them.
+        """
         df_case = df_case.copy()
         for col in self.categorical_columns:
             if col not in df_case:
@@ -434,11 +510,19 @@ class TensorEncoderDecoder:
         )
 
     # Encode full dataframe
-    def encode_df(self, df) -> tuple[
+    def encode_df(
+        self, df
+    ) -> tuple[
         dict[str, object],
         tuple[list[tuple[str, int, dict[str, int]]]],
         tuple[list[tuple[str, int, dict[str, int]]]],
     ]:
+        """
+        Encode the entire dataframe into tensors.
+
+        Returns categorical and continuous columns,
+        static attributes and padding metadata.
+        """
         categorical_tensors = []
         all_categories = [[], []]
         static_categories = [[], []]
@@ -471,7 +555,8 @@ class TensorEncoderDecoder:
             or zero_padding_tensor is None
         ):
             raise ValueError(
-                "Concept column must be part of the categorical_columns to compute padding metadata."
+                "Concept column must be part of the categorical_columns to"
+                "compute padding metadata."
             )
 
         continuous_tensors = []
@@ -480,7 +565,7 @@ class TensorEncoderDecoder:
             desc="continouous tensors",
         ):
             continuous_tensors.append(self.encode_continuous_column(df, col))
-            all_categories[1].append((col, 1, dict()))
+            all_categories[1].append((col, 1, {}))
 
         for col in self.static_categorical_columns:
             filtered_categories = [
@@ -494,7 +579,7 @@ class TensorEncoderDecoder:
             max_classes = len(filtered_categories) + 1
             static_categories[0].append((col, max_classes, categories))
         for col in self.static_continuous_columns:
-            static_categories[1].append((col, 1, dict()))
+            static_categories[1].append((col, 1, {}))
 
         static_cat_tensor, static_cont_tensor = self._encode_static_attributes(
             df, case_ids
@@ -512,10 +597,12 @@ class TensorEncoderDecoder:
 
         return tensor_bundle, tuple(all_categories), tuple(static_categories)
 
-    # Corrected verison:
     def encode_categorical_column(
         self, df, col, return_case_ids_and_eos_paddings=False
     ):
+        """
+        Encode a single categorical column into a tensor.
+        """
         grouped = df.groupby(self.case_name)
         windows = []
         eos_masks = []
@@ -537,7 +624,6 @@ class TensorEncoderDecoder:
             padded_encodings = []
 
             for prefix_len in range(self.min_suffix_size + 1, len(case_values_enc) + 1):
-
                 padded_slice = self.pad_to_window_size(case_values_enc[:prefix_len])
 
                 padded_encodings.append(padded_slice)
@@ -588,9 +674,12 @@ class TensorEncoderDecoder:
             return t.squeeze(-1), categories, max_classes
 
     def encode_continuous_column(self, df, col):
+        """
+        Encode a single continuous column into a tensor.
+        """
         grouped = df.groupby(self.case_name)
         windows = []
-        for case_id, group in tqdm(grouped, desc=col, leave=False):
+        for _case_id, group in tqdm(grouped, desc=col, leave=False):
             case_values = group[[col]].values  # shape (n,1)
             case_values_imputed = self.continuous_imputers[col].transform(case_values)
             case_values_enc = self.continuous_encoders[col].transform(
@@ -614,12 +703,16 @@ class TensorEncoderDecoder:
         return t.squeeze(-1)
 
     def pad_to_window_size(self, previous_values):
+        """
+        Pad or truncate the previous values to match the window size.
+        """
         prev_list = np.asarray(previous_values).tolist()
         if len(prev_list) > self.window_size:
             return prev_list[-self.window_size :]
         else:
             pad_count = self.window_size - len(prev_list)
-            # use 0.0 for continuous; for categorical it will be cast to int later when dtype=int
+            # use 0.0 for continuous;
+            # for categorical it will be cast to int later when dtype=int
             return [[0.0]] * pad_count + prev_list
 
     def _encode_static_attributes(
@@ -714,10 +807,12 @@ class TensorEncoderDecoder:
             return np.nan
         return cleaned.iloc[0]
 
-    #
     def decode_event(self, event_tuple: tuple):
+        """
+        Convert a single event in a case to a human-readable dictionary.
+        """
         cat, cont, *_, case_id = event_tuple
-        decoded_event = dict()
+        decoded_event = {}
         for i, col in enumerate(self.categorical_columns):
             enc_col = cat[i].unsqueeze(-1).numpy()
             if col in self.categorical_encoders:
@@ -750,9 +845,15 @@ class TensorEncoderDecoder:
         return pd.DataFrame(decoded_event)
 
     def __get_continuous_imputer(self):
+        """
+        Get the imputer for continuous variables.
+        """
         return SimpleImputer(strategy="mean")
 
     def __get_categorical_encoder(self):
+        """
+        Get the encoder for categorical variables.
+        """
         return sklearn.preprocessing.OrdinalEncoder(
             handle_unknown="use_encoded_value",
             unknown_value=-1,
@@ -760,19 +861,37 @@ class TensorEncoderDecoder:
         )
 
     def __get_continuous_encoder(self):
+        """
+        Get the encoder for continuous variables.
+        """
         return sklearn.preprocessing.StandardScaler()
 
     def __get_continuous_positive_imputer(self):
+        """
+        Get the imputer for continuous positive variables.
+        """
         return SimpleImputer(strategy="mean")
 
     def __get_continuous_positive_encoder(self):
+        """
+        Get the encoder for continuous positive variables.
+        """
         standardizer = PositiveStandardizer_normed()
         return standardizer
 
 
-# class that provides intermediate steps: create dataframe of prefixes for marking determination:
 class PrefixesDataFrameLoader:
+    """
+    Loader that creates dataframes of prefixes from event log data.
+
+    Class that provides intermediate steps:
+    create dataframe of prefixes for marking determination:
+    """
+
     def __init__(self, event_log_location: str, event_log_properties: Dict[str, Any]):
+        """
+        Initialize the PrefixesDataFrameLoader.
+        """
         if not event_log_properties:
             raise ValueError("event_log_properties are required")
         self.event_log_properties = event_log_properties
@@ -824,8 +943,13 @@ class PrefixesDataFrameLoader:
         self.val_df = self.processed_splits["val"]
         self.test_df = self.processed_splits["test"]
 
-    # Return Raw full dataframe: dynamic as lists, static as values
     def get_raw_dataframe(self) -> pd.DataFrame:
+        """
+        Return the raw full dataframe.
+
+        The dataframe contains dynamic columns
+        as lists and static columns as values.
+        """
         return self.csv2event_log.raw_df.copy()
 
     def _resolve_window_size(self) -> int:
@@ -859,9 +983,10 @@ class PrefixesDataFrameLoader:
     def transform(
         self, df: Optional[pd.DataFrame] = None, with_eos: Optional[bool] = False
     ) -> pd.DataFrame:
-        #
+        """
+        Transform the event log into a dataframe of prefixes.
+        """
         working_df = self.event_log if df is None else df
-        #
         rows = []
         grouped = working_df.groupby(self.case_name, sort=False)
         for case_id, group in grouped:
@@ -912,6 +1037,9 @@ class PrefixesDataFrameLoader:
 
     # Return dataframe transformed
     def get_dataset(self, type: str):
+        """
+        Return the transformed dataframe for the specified dataset type.
+        """
         if type == "train":
             df = self.transform(df=self.train_df)
         elif type == "val":
@@ -921,9 +1049,15 @@ class PrefixesDataFrameLoader:
         return df
 
     def get_all_datasets(self):
+        """
+        Return the raw full dataframes for train, validation, and test datasets.
+        """
         return self.train_df, self.val_df, self.test_df
 
     def extract_feature_info(self):
+        """
+        Extract information about categorical and continuous features in the event log.
+        """
         categories_info = {}
         ranges_info = {}
 
@@ -962,64 +1096,11 @@ class PrefixesDataFrameLoader:
         return {"categorical": categories_info, "continuous": ranges_info}
 
 
-# create event log
-class EventLogLoader:
-    def __init__(
-        self,
-        event_log_location,
-        event_log_properties,
-        prefix_df: PrefixesDataFrameLoader = None,
-    ):
-        if prefix_df is not None:
-            # event log
-            self.event_log = prefix_df.csv2event_log
-            #
-            self.train_df = prefix_df.train_df.copy()
-            self.val_df = prefix_df.val_df.copy()
-            self.test_df = prefix_df.test_df.copy()
-        else:
-            self.event_log = CSV2EventLog(event_log_location, **event_log_properties)
-            splitter = EventLogSplitter(**event_log_properties)
-            self.train_df, self.val_df, self.test_df = splitter.split(self.event_log)
-
-        self.encoder_decoder = TensorEncoderDecoder(
-            self.train_df, **event_log_properties
-        )
-        # Data are transformed
-        self.encoder_decoder.train_imputers_encoders()
-
-    # get encoded dataframe
-    def get_encoded_dataframe(self, type: str):
-        if type == "train":
-            df = self.train_df
-        elif type == "val":
-            df = self.val_df
-        elif type == "test":
-            df = self.test_df
-        else:
-            raise ValueError("type must be one of 'train', 'val', or 'test'")
-        return df
-
-    # get encoded data as tensors
-    def get_dataset(self, type: str):
-        if type == "train":
-            df = self.train_df
-        elif type == "val":
-            df = self.val_df
-        elif type == "test":
-            df = self.test_df
-        else:
-            raise ValueError("type must be one of 'train', 'val', or 'test'")
-        encoded_data, all_categories, all_static_categories = (
-            self.encoder_decoder.encode_df(df)
-        )
-        return EventLogDataset(
-            encoded_data, all_categories, all_static_categories, self.encoder_decoder
-        )
-
-
-# return object: returns tensors and all further information
 class EventLogDataset(Dataset):
+    """
+    Dataset class for event log data.
+    """
+
     def __init__(
         self,
         tensor_bundle: dict[str, object],
@@ -1027,6 +1108,9 @@ class EventLogDataset(Dataset):
         all_static_categories: tuple[list[tuple[str, int, dict[str, int]]]],
         encoder_decoder: TensorEncoderDecoder,
     ):
+        """
+        Initialize the EventLogDataset with tensor data and encoding information.
+        """
         self.tensor_bundle = tensor_bundle
 
         self.case_ids: list[object] = list(tensor_bundle["case_ids"])
@@ -1057,9 +1141,15 @@ class EventLogDataset(Dataset):
         )
 
     def __len__(self):
+        """
+        Return the number of samples in the dataset.
+        """
         return self.eos_padding.shape[0]
 
     def __getitem__(self, idx):
+        """
+        Return the sample at the specified index.
+        """
         case_id = self.case_ids[idx]
 
         categorical_items = [tensor[idx] for tensor in self.categorical_tensors]
@@ -1088,12 +1178,16 @@ class EventLogDataset(Dataset):
     def set_prefix_markings(
         self, markings, indices: Optional[Iterable[int]] = None
     ) -> None:
+        """
+        Set the prefix Petri net markings for the dataset.
+        """
         markings_list = list(markings)
 
         if indices is None:
             if len(markings_list) != len(self.prefixes_petri_net_marking):
                 raise ValueError(
-                    "Number of markings must match dataset length when indices are omitted"
+                    "Number of markings must match dataset length when indices are"
+                    " omitted"
                 )
             target_indices = range(len(self.prefixes_petri_net_marking))
         else:
@@ -1103,9 +1197,81 @@ class EventLogDataset(Dataset):
                     "indices and markings must reference the same number of rows"
                 )
 
-        for idx, marking in zip(target_indices, markings_list):
+        for idx, marking in zip(target_indices, markings_list, strict=False):
             if isinstance(marking, torch.Tensor):
                 marking = marking.detach().cpu().tolist()
             elif isinstance(marking, np.ndarray):
                 marking = marking.tolist()
             self.prefixes_petri_net_marking[idx] = marking
+
+
+# create event log
+class EventLogLoader:
+    """
+    Loader that creates datasets from event log data.
+    """
+
+    def __init__(
+        self,
+        event_log_location,
+        event_log_properties,
+        prefix_df: PrefixesDataFrameLoader = None,
+    ):
+        """
+        Initialize the EventLogLoader.
+
+        Using event log location, properties,
+        and optional prefix dataframe.
+        """
+        if prefix_df is not None:
+            # event log
+            self.event_log = prefix_df.csv2event_log
+            #
+            self.train_df = prefix_df.train_df.copy()
+            self.val_df = prefix_df.val_df.copy()
+            self.test_df = prefix_df.test_df.copy()
+        else:
+            self.event_log = CSV2EventLog(event_log_location, **event_log_properties)
+            splitter = EventLogSplitter(**event_log_properties)
+            self.train_df, self.val_df, self.test_df = splitter.split(self.event_log)
+
+        self.encoder_decoder = TensorEncoderDecoder(
+            self.train_df, **event_log_properties
+        )
+        # Data are transformed
+        self.encoder_decoder.train_imputers_encoders()
+
+    # get encoded dataframe
+    def get_encoded_dataframe(self, type: str) -> pd.DataFrame:
+        """
+        Returns the raw dataframe for the specified dataset type.
+        """
+        if type == "train":
+            df = self.train_df
+        elif type == "val":
+            df = self.val_df
+        elif type == "test":
+            df = self.test_df
+        else:
+            raise ValueError("type must be one of 'train', 'val', or 'test'")
+        return df
+
+    # get encoded data as tensors
+    def get_dataset(self, type: str) -> EventLogDataset:
+        """
+        Return the dataset for the specified type as an EventLogDataset.
+        """
+        if type == "train":
+            df = self.train_df
+        elif type == "val":
+            df = self.val_df
+        elif type == "test":
+            df = self.test_df
+        else:
+            raise ValueError("type must be one of 'train', 'val', or 'test'")
+        encoded_data, all_categories, all_static_categories = (
+            self.encoder_decoder.encode_df(df)
+        )
+        return EventLogDataset(
+            encoded_data, all_categories, all_static_categories, self.encoder_decoder
+        )

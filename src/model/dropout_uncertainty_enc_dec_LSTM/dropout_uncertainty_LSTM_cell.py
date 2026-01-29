@@ -1,26 +1,35 @@
 """
 LSTM cells using dropout as a Bayesian approximation.
 """
+
 # performance imports for torch: torch kernel uses one core only.
 import os
+
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["TORCH_NUM_THREADS"] = "1" 
+os.environ["TORCH_NUM_THREADS"] = "1"
 
-import torch
-from torch import nn, Tensor
 from typing import Optional, Tuple
 
+import torch
+from torch import Tensor, nn
+
+
 class DropoutUncertaintyLSTMCell(nn.Module):
-    def __init__(self,
-                 input_size: int,
-                 hidden_size: int,
-                 dropout: Optional[float]=None):
+    """
+    LSTM cell with MC Dropout for uncertainty estimation.
+    """
+
+    def __init__(
+        self, input_size: int, hidden_size: int, dropout: Optional[float] = None
+    ):
         """
-        ARGS:
-        - input_size: Size of input features
-        - hidden_size: Size of hidden layer
-        - dropout: should be between 0 and 1
+        Initializes LSTM cell with MC Dropout.
+
+        Args:
+            input_size (int): Size of input features.
+            hidden_size (int): Size of hidden layer.
+            dropout (Optional[float]): Dropout probability, should be between 0 and 1.
         """
         super(DropoutUncertaintyLSTMCell, self).__init__()
 
@@ -50,51 +59,54 @@ class DropoutUncertaintyLSTMCell(nn.Module):
         # Output gate
         self.Wo = nn.Linear(self.input_size, self.hidden_size)
         self.Uo = nn.Linear(self.hidden_size, self.hidden_size)
-                
+
         self.init_weights()
-    
+
     def init_weights(self):
         """
-        Initializes weight layers with initial values
+        Initializes weight layers with initial values.
         """
         k = torch.tensor(self.hidden_size, dtype=torch.float32).reciprocal().sqrt()
-        
+
         # Input gate weights:
-        self.Wi.weight.data.uniform_(-k,k)
-        self.Wi.bias.data.uniform_(-k,k)
-        self.Ui.weight.data.uniform_(-k,k)
-        self.Ui.bias.data.uniform_(-k,k)
-        
+        self.Wi.weight.data.uniform_(-k, k)
+        self.Wi.bias.data.uniform_(-k, k)
+        self.Ui.weight.data.uniform_(-k, k)
+        self.Ui.bias.data.uniform_(-k, k)
+
         # Forget gate weights
-        self.Wf.weight.data.uniform_(-k,k)
-        self.Wf.bias.data.uniform_(-k,k)
-        self.Uf.weight.data.uniform_(-k,k)
-        self.Uf.bias.data.uniform_(-k,k)
-        
+        self.Wf.weight.data.uniform_(-k, k)
+        self.Wf.bias.data.uniform_(-k, k)
+        self.Uf.weight.data.uniform_(-k, k)
+        self.Uf.bias.data.uniform_(-k, k)
+
         # Cell state gate weights
-        self.Wc.weight.data.uniform_(-k,k)
-        self.Wc.bias.data.uniform_(-k,k)
-        self.Uc.weight.data.uniform_(-k,k)
-        self.Uc.bias.data.uniform_(-k,k)
-        
+        self.Wc.weight.data.uniform_(-k, k)
+        self.Wc.bias.data.uniform_(-k, k)
+        self.Uc.weight.data.uniform_(-k, k)
+        self.Uc.bias.data.uniform_(-k, k)
+
         # Output gate weights
-        self.Wo.weight.data.uniform_(-k,k)
-        self.Wo.bias.data.uniform_(-k,k)
-        self.Uo.weight.data.uniform_(-k,k)
-        self.Uo.bias.data.uniform_(-k,k)
-        
-    def _mc_dropout_sample_mask(self, B: int, device: torch.device) -> Tuple[Tensor, Tensor]:
+        self.Wo.weight.data.uniform_(-k, k)
+        self.Wo.bias.data.uniform_(-k, k)
+        self.Uo.weight.data.uniform_(-k, k)
+        self.Uo.bias.data.uniform_(-k, k)
+
+    def _mc_dropout_sample_mask(
+        self, B: int, device: torch.device
+    ) -> Tuple[Tensor, Tensor]:
         """
-        Applies dropout to the LSTM Cell weight layers
-        
+        Applies dropout to the LSTM Cell weight layers.
+
         INPUTS:
         B: Batch size
 
         OUTPUTS:
         zx: Dropout mask for weight layer before input
         zh: Dropout mask for weight layer before hidden
-        
-        Note: value p_logit at infinity can cause numerical instability. Dropout masks for 4 gates, scale input by 1 / (1 - p)
+
+        Note: value p_logit at infinity can cause numerical instability.
+        Dropout masks for 4 gates, scale input by 1 / (1 - p)
         """
         # Check dropout probability
         if isinstance(self.p_logit, float):
@@ -104,28 +116,63 @@ class DropoutUncertaintyLSTMCell(nn.Module):
 
         # Four Weight matrix pairs: Perform dropout for each weight layer.
         GATES = 4
-        
+
         eps = torch.tensor(1e-7, device=device, dtype=torch.float32)
         t = 1e-1
 
-        # tensors with random values: 
-        ux = torch.rand(GATES, B, self.input_size, device=device, dtype=torch.float32) # dim gates x batch_size x input_size
-        uh = torch.rand(GATES, B, self.hidden_size, device=device, dtype=torch.float32)  # dim (gates=weight matrices per cell x batch_size x hidden_size)
+        # tensors with random values:
+        ux = torch.rand(
+            GATES, B, self.input_size, device=device, dtype=torch.float32
+        )  # dim gates x batch_size x input_size
+        uh = torch.rand(
+            GATES, B, self.hidden_size, device=device, dtype=torch.float32
+        )  # dim (gates=weight matrices per cell x batch_size x hidden_size)
 
-        # Dropout masks: containing values near 1 for keeping weights, and near 0 for dropping weights for each gate and batch
+        # Dropout masks: containing values near 1 for keeping weights,
+        # and near 0 for dropping weights for each gate and batch
         if self.input_size == 1:
-            zx = (1-torch.sigmoid((torch.log(eps) - torch.log(1+eps)+ torch.log(ux+eps) - torch.log(1-ux+eps))/ t))
+            zx = 1 - torch.sigmoid(
+                (
+                    torch.log(eps)
+                    - torch.log(1 + eps)
+                    + torch.log(ux + eps)
+                    - torch.log(1 - ux + eps)
+                )
+                / t
+            )
         else:
             # dim: gates x batch_size x input_features
-            zx = (1-torch.sigmoid((torch.log(p+eps) - torch.log(1-p+eps) + torch.log(ux+eps) - torch.log(1-ux+eps))/ t)) / (1-p)
+            zx = (
+                1
+                - torch.sigmoid(
+                    (
+                        torch.log(p + eps)
+                        - torch.log(1 - p + eps)
+                        + torch.log(ux + eps)
+                        - torch.log(1 - ux + eps)
+                    )
+                    / t
+                )
+            ) / (1 - p)
         # dim: gates x batch_size x input_features
-        zh = (1-torch.sigmoid((torch.log(p+eps) - torch.log(1-p+eps)+ torch.log(uh+eps) - torch.log(1-uh+eps))/ t)) / (1-p)
+        zh = (
+            1
+            - torch.sigmoid(
+                (
+                    torch.log(p + eps)
+                    - torch.log(1 - p + eps)
+                    + torch.log(uh + eps)
+                    - torch.log(1 - uh + eps)
+                )
+                / t
+            )
+        ) / (1 - p)
 
         return zx, zh
 
     def regularizer(self):
         """
-        L2 regularization of weights and biases scaled for dropout
+        L2 regularization of weights and biases scaled for dropout.
         """
         # Compute dropout probability
         if isinstance(self.p_logit, float):
@@ -133,27 +180,38 @@ class DropoutUncertaintyLSTMCell(nn.Module):
         else:
             p = torch.sigmoid(self.p_logit)
 
-        # Weight L2 sum (keeps autograd). For MC-dropout-as-variational-inference: the KL/L2 term is typically scaled by (1-p) rather than 1/(1-p).
-        keep_prob = (1. - p)
-        weight_sum = sum(
-            torch.sum(params ** 2)
-            for name, params in self.named_parameters()
-            if name.endswith("weight")
-        ) * keep_prob
+        # Weight L2 sum (keeps autograd).
+        # For MC-dropout-as-variational-inference:
+        # the KL/L2 term is typically scaled by (1-p) rather than 1/(1-p).
+        keep_prob = 1.0 - p
+        weight_sum = (
+            sum(
+                torch.sum(params**2)
+                for name, params in self.named_parameters()
+                if name.endswith("weight")
+            )
+            * keep_prob
+        )
 
         # Bias L2 sum
-        bias_sum = sum(torch.sum(params ** 2) 
-                    for name, params in self.named_parameters() 
-                    if name.endswith("bias"))
+        bias_sum = sum(
+            torch.sum(params**2)
+            for name, params in self.named_parameters()
+            if name.endswith("bias")
+        )
 
         return weight_sum, bias_sum
 
-    def forward(self,
-                input: Tensor,
-                hx: Optional[Tuple[Tensor, Tensor]] = None,
-                z: Optional[Tuple[Tensor, Tensor]] = None,
-                mask: Optional[Tensor] = None) -> Tuple[Tensor, Tuple[Tensor, Tensor], Tuple[Tensor, Tensor]]:
+    def forward(
+        self,
+        input: Tensor,
+        hx: Optional[Tuple[Tensor, Tensor]] = None,
+        z: Optional[Tuple[Tensor, Tensor]] = None,
+        mask: Optional[Tensor] = None,
+    ) -> Tuple[Tensor, Tuple[Tensor, Tensor], Tuple[Tensor, Tensor]]:
         """
+        Performs forward pass of LSTM cell with MC Dropout.
+
         INPUTS:
         - input: Input tensor with shape (sequence, batch, input dimension)
         - hx: h_t: hidden state and c_t: cell state as tuple at time step (event t)
@@ -165,7 +223,6 @@ class DropoutUncertaintyLSTMCell(nn.Module):
         - (h_t, c_t): Last hidden and cell state
         - (zx, zh): Applied MC dropout masks
         """
-
         device = input.device
         T, B, _ = input.shape
 

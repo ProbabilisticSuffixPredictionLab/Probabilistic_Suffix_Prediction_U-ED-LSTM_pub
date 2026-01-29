@@ -1,28 +1,29 @@
-from .evaluation import Evaluation
+import concurrent.futures
+import os
+import random
 
 # performance imports for torch: torch kernel uses one core only.
-import os
-
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["TORCH_NUM_THREADS"] = "1"
 
 import torch
 import torch.nn.functional as F
+from .evaluation import Evaluation
 from tqdm.notebook import tqdm
-import multiprocessing
-import concurrent.futures
-import random
+
 
 class ProbabilisticEvaluation(Evaluation):
+    """Probabilistic evaluation class for sequence prediction models."""
+
     def __init__(
         self,
         model,
         dataset,
         concept_name="concept:name",
         eos_value="EOS",
-        growing_num_values=["case_elapsed_time"],
-        positive_num_values=["event_elapsed_time"],
+        growing_num_values=None,
+        positive_num_values=None,
         decoder_cat=None,
         decoder_num=None,
         num_processes: int = 32,
@@ -32,7 +33,11 @@ class ProbabilisticEvaluation(Evaluation):
         use_variance_num: bool = True,
         variational_dropout_sampling: bool = False,
     ):
-
+        """Initialize probabilistic evaluation."""
+        if positive_num_values is None:
+            positive_num_values = ["event_elapsed_time"]
+        if growing_num_values is None:
+            growing_num_values = ["case_elapsed_time"]
         super().__init__(
             model,
             dataset,
@@ -76,6 +81,7 @@ class ProbabilisticEvaluation(Evaluation):
         )
 
     def sample_cat_predictions(self, cat_means, cat_variances):
+        """Sample categorical predictions."""
         return ProbabilisticEvaluation.sample_cat_predictions_optim(
             self.all_cat_attributes,
             self.use_variance_cat,
@@ -84,7 +90,7 @@ class ProbabilisticEvaluation(Evaluation):
             cat_variances,
         )
 
-    @torch.jit.script
+    # @torch.jit.script
     def sample_cat_predictions_optim(
         all_cat_attributes: list[str],
         use_variance_cat: bool,
@@ -92,10 +98,12 @@ class ProbabilisticEvaluation(Evaluation):
         cat_means: dict[str, torch.Tensor],
         cat_variances: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
+        """Sample categorical predictions."""
         result = {}
         for c in all_cat_attributes:
             if use_variance_cat:
-                # cat_variances[*_var] is treated as log-variance (consistent with training loss).
+                # cat_variances[*_var] is treated as log-variance
+                # (consistent with training loss).
                 logvar = torch.clamp(cat_variances[c + "_var"], min=-6.0, max=6.0)
                 std = torch.exp(0.5 * logvar)
                 sampled_cats = torch.normal(cat_means[c + "_mean"], std)
@@ -113,6 +121,7 @@ class ProbabilisticEvaluation(Evaluation):
         return result
 
     def sample_num_predictions(self, num_means, num_variances, last_values):
+        """Sample numerical predictions."""
         return ProbabilisticEvaluation.sample_num_predictions_optim(
             self.all_num_attributes,
             self.use_variance_num,
@@ -124,7 +133,7 @@ class ProbabilisticEvaluation(Evaluation):
             last_values,
         )
 
-    @torch.jit.script
+    # @torch.jit.script
     def sample_num_predictions_optim(
         all_num_attributes: list[str],
         use_variance_num: bool,
@@ -135,6 +144,7 @@ class ProbabilisticEvaluation(Evaluation):
         num_variances: dict[str, torch.Tensor],
         last_values: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
+        """Sample numerical predictions."""
         result = {}
         for c in all_num_attributes:
             if use_variance_num:
@@ -166,6 +176,7 @@ class ProbabilisticEvaluation(Evaluation):
     def sample_suffix(
         self, prefix, prefix_len, static_inputs, mask, include_model_states
     ):
+        """Sample a single suffix for a given prefix."""
         # add first the prefix and static attributes:
         # Pass mask to inference (encoder)
         prediction, (h, c), z = self.model.inference(
@@ -195,9 +206,11 @@ class ProbabilisticEvaluation(Evaluation):
             model_states = []
 
         i = 0
-        eos_predicted = (
-            lambda: cat_predictions[self.concept_name + "_mean"] == self.eos_id
-        )
+
+        def eos_predicted():
+            """Check if the end-of-sequence token has been predicted."""
+            return cat_predictions[self.concept_name + "_mean"] == self.eos_id
+
         while i <= max_iteration and not eos_predicted():
             readable_prediction = self.prediction_to_readable(
                 cat_predictions, num_predictions
@@ -247,6 +260,7 @@ class ProbabilisticEvaluation(Evaluation):
     def predict_probabilistic_suffix(
         self, prefix, prefix_len, static_inputs, mask, include_model_states
     ):
+        """Predict probabilistic suffixes for a given prefix."""
         suffixes = []
         for _ in range(self.samples_per_case):
             suffix = self.sample_suffix(
@@ -256,6 +270,7 @@ class ProbabilisticEvaluation(Evaluation):
         return suffixes
 
     def _clone_static_attributes(self, static_atts):
+        """Clone static attributes to avoid unintended modifications."""
         if static_atts is None:
             return None
         cloned = []
@@ -269,13 +284,14 @@ class ProbabilisticEvaluation(Evaluation):
         return tuple(cloned)
 
     def count_only(self, random_order=False):
+        """Count the number of prefixes to be evaluated."""
         case_items = list(self.cases.items())
         if random_order:
             case_items = random.sample(case_items, len(case_items))
-        for i, (case_name, full_case) in tqdm(
+        for _i, (case_name, full_case) in tqdm(
             enumerate(case_items), total=len(self.cases)
         ):
-            for j, (prefix_len, prefix, static_atts, suffix) in enumerate(
+            for _j, (prefix_len, _prefix, _static_atts, _suffix) in enumerate(
                 self._iterate_case(full_case)
             ):
                 yield case_name, prefix_len, None, None, None, None
@@ -283,6 +299,7 @@ class ProbabilisticEvaluation(Evaluation):
     def _evaluate_single(
         self, case_name, prefix_len, prefix, mask, statics, suffix, include_model_states
     ):
+        """Evaluate a single case prefix."""
         readable_prefix = self.case_to_readable(prefix, prune_eos=False)
         readable_suffix = self.case_to_readable(suffix, prune_eos=True)
         mean_prediction = self._predict_suffix_with_means(
@@ -304,7 +321,8 @@ class ProbabilisticEvaluation(Evaluation):
         # print(case_name)
         # print(prefix_len)
         # print("prefix:", [prefix['concept:name'] for prefix in readable_prefix])
-        # print("target suffix: ",  [suffix['concept:name'] for suffix in readable_suffix])
+        # print("target suffix: ",
+        #   [suffix['concept:name'] for suffix in readable_suffix])
         # print("most likely", [suffix['concept:name'] for suffix in mean_prediction])
 
         return (
@@ -319,6 +337,7 @@ class ProbabilisticEvaluation(Evaluation):
     # Evaluate methods
     #
     def evaluate(self, random_order=False, include_model_states=False):
+        """Evaluate sequentially."""
         # compiled_evaluate_single = torch.compile(self._evaluate_single)
         case_items = list(self.cases.items())
         if random_order:
@@ -338,27 +357,27 @@ class ProbabilisticEvaluation(Evaluation):
                     suffix,
                     include_model_states,
                 )
-
             break
 
-    #
     def evaluate_multi_processing(self, random_order=False, include_model_states=False):
+        """Evaluate using multi-processing."""
         case_items = list(self.cases.items())
         if random_order:
             case_items = random.sample(case_items, len(case_items))
         max_in_flight = self.num_processes
         futures = []
-        multiprocessing.set_start_method('spawn', force=True)
+        # multiprocessing.set_start_method('spawn', force=True)
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=self.num_processes
         ) as executor:
             for i, (case_name, full_case) in tqdm(
                 enumerate(case_items), total=len(self.cases)
             ):
-                for j, (prefix_len, prefix, zero_mask, statics, suffix) in enumerate(
+                for _j, (prefix_len, prefix, zero_mask, statics, suffix) in enumerate(
                     self._iterate_case(full_case)
                 ):
-                    # we need an explicit copy here - otherwise we run into very bad memory issues
+                    # we need an explicit copy here -
+                    # otherwise we run into very bad memory issues
                     prefix = [[t.clone() for t in i] for i in prefix]
                     suffix = [[t.clone() for t in i] for i in suffix]
 
@@ -390,10 +409,10 @@ class ProbabilisticEvaluation(Evaluation):
             for future in concurrent.futures.as_completed(futures):
                 yield future.result()
 
-    #
     def evaluate_continue_multi_processing(
         self, processed_prefixes, random_order=False, include_model_states=False
     ):
+        """Continue evaluation from previously processed prefixes."""
         case_items = list(self.cases.items())
         if random_order:
             case_items = random.sample(case_items, len(case_items))
@@ -411,7 +430,6 @@ class ProbabilisticEvaluation(Evaluation):
                     statics,
                     suffix,
                 ) in self._iterate_case(full_case):
-
                     if (case_name, prefix_len) in processed_prefixes:
                         print("skipped", case_name, prefix_len)
                     else:
