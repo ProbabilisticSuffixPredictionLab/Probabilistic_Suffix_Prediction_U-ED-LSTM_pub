@@ -17,7 +17,7 @@ class InductiveMiner:
         self.timestamp_col = timestamp_col
         self.resource_col = resource_col
 
-    def _create_event_log(self):
+    def _create_event_log(self, case_ids: Optional[list] = None):
         df = pd.read_csv(self.path_to_csv_log)
         
         # Rename: for example important for helpdesk:
@@ -28,13 +28,16 @@ class InductiveMiner:
             
         df = df.rename(columns=rename)
         df["time:timestamp"] = pd.to_datetime(df["time:timestamp"], errors="coerce")
+
+        if case_ids is not None:
+            df = df[df["case:concept:name"].isin(case_ids)]
         
         params = {log_converter.Variants.TO_EVENT_LOG.value.Parameters.CASE_ID_KEY: "case:concept:name"}
         ev_log = log_converter.apply(df, variant=log_converter.Variants.TO_EVENT_LOG, parameters=params)
         return df, ev_log
 
-    def discover_petri_net(self, visulaize: bool=True, store_loc_file_path:Optional[str]=None):
-        _, event_log = self._create_event_log()
+    def discover_petri_net(self, visulaize: bool=True, store_loc_file_path:Optional[str]=None, case_ids: Optional[list] = None):
+        _, event_log = self._create_event_log(case_ids=case_ids)
         net, initial_marking, final_marking = pm4py.discover_petri_net_inductive(event_log,
                                                                                  multi_processing=False)
     

@@ -103,7 +103,6 @@ class RawDataFrameLoader:
         return pd.DataFrame(records)
 
 
-# base object for the dataset creation
 class CSV2EventLog(RawDataFrameLoader):
     """
     Base class for loading event logs from CSV files.
@@ -242,7 +241,6 @@ class CSV2EventLog(RawDataFrameLoader):
         return concat_case
 
 
-#  split dataframes
 class EventLogSplitter:
     """
     Split event log into train, train_validation, and test_validation sets.
@@ -284,7 +282,6 @@ class EventLogSplitter:
         return train_df, train_validation_df, test_validation_df
 
 
-# standardization for log-normal
 class PositiveStandardizer_normed(BaseEstimator, TransformerMixin):
     """
     Standard scaler for log normal attributes.
@@ -331,7 +328,6 @@ class PositiveStandardizer_normed(BaseEstimator, TransformerMixin):
         return x
 
 
-# responsible for tensor encoding of event log data
 class TensorEncoderDecoder:
     """
     Responsible for tensor encoding of event log data.
@@ -457,7 +453,6 @@ class TensorEncoderDecoder:
             .unsqueeze(0)
         )
 
-    # Encode single case
     def encode_case(
         self, df_case: pd.DataFrame
     ) -> tuple[
@@ -509,7 +504,6 @@ class TensorEncoderDecoder:
             zero_mask,
         )
 
-    # Encode full dataframe
     def encode_df(
         self, df
     ) -> tuple[
@@ -1035,7 +1029,6 @@ class PrefixesDataFrameLoader:
                 rows.append(row)
         return pd.DataFrame(rows)
 
-    # Return dataframe transformed
     def get_dataset(self, type: str):
         """
         Return the transformed dataframe for the specified dataset type.
@@ -1174,7 +1167,6 @@ class EventLogDataset(Dataset):
             prefixes_petri_net_marking,
         )
 
-    # Add the petri net markings to the dataset
     def set_prefix_markings(
         self, markings, indices: Optional[Iterable[int]] = None
     ) -> None:
@@ -1205,7 +1197,6 @@ class EventLogDataset(Dataset):
             self.prefixes_petri_net_marking[idx] = marking
 
 
-# create event log
 class EventLogLoader:
     """
     Loader that creates datasets from event log data.
