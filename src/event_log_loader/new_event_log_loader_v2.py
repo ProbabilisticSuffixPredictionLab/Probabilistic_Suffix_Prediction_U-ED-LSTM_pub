@@ -1,3 +1,7 @@
+"""
+
+
+"""
 from functools import partial
 from typing import Any, Dict, Iterable, Optional
 
@@ -10,6 +14,93 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer
 from torch.utils.data import Dataset
 from tqdm.notebook import tqdm
+
+
+def _categorical_token(value: object) -> object:
+    """Normalize categorical values.
+
+    Goal: keep integer-coded categories stable (e.g. 1, 1.0 -> "1") so they
+    don't end up as float-looking categories ("1.0").
+
+    We keep tokens as `object` (typically strings) to avoid mixed-type sorting
+    issues inside sklearn encoders.
+    """
+    if pd.isna(value):
+        return value
+    if isinstance(value, str):
+        return value
+
+    if isinstance(value, (bool, np.bool_)):
+        return str(bool(value))
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)):
+        if np.isfinite(value) and float(value).is_integer():
+            return str(int(value))
+        return str(value)
+
+    return str(value)
+
+def _normalize_categorical_series(series: pd.Series) -> pd.Series:
+    return series.map(_categorical_token).astype(object)
+
+def _ensure_group_key_column(df: pd.DataFrame, key: str) -> pd.DataFrame:
+    """Ensure `key` exists as a DataFrame column.
+
+    Pandas groupby/apply pipelines may move the grouping key into the index.
+    Most of this codebase expects `key` to be a normal column.
+    """
+    if key in df.columns:
+        return df
+
+    if df.index.name == key:
+        return df.reset_index()
+
+    if isinstance(df.index, pd.MultiIndex) and key in (df.index.names or []):
+        return df.reset_index(level=key)
+
+    return df
+
+def _groupby_apply_preserve_key(
+    df: pd.DataFrame, key: str, func, *, sort: bool = False
+) -> pd.DataFrame:
+    """Run `df.groupby(key).apply(func)` and keep `key` as a column."""
+    df = _ensure_group_key_column(df, key)
+    applied = df.groupby(key, sort=sort).apply(func)
+
+    if key not in applied.columns:
+        if applied.index.name == key:
+            applied = applied.reset_index()
+        elif isinstance(applied.index, pd.MultiIndex) and key in (applied.index.names or []):
+            applied = applied.reset_index(level=key)
+
+    return applied
+
+
+def _marking_signature(marking: object, *, sort_tokens: bool = True) -> tuple[str, ...]:
+    """Return a hashable, comparable signature for a Petri net marking.
+
+    notebook compares markings by their token sets (sorted string
+    representation). This mirrors that logic so markings can be compared across
+    train/val/test splits.
+    """
+    if marking is None or (isinstance(marking, float) and np.isnan(marking)):
+        return ("<NA>",)
+
+    if isinstance(marking, torch.Tensor):
+        marking = marking.detach().cpu().tolist()
+    elif isinstance(marking, np.ndarray):
+        marking = marking.tolist()
+
+    # If it's already an iterable of tokens (most common case)
+    if isinstance(marking, (list, tuple, set)):
+        tokens = [str(t) for t in marking]
+        if sort_tokens:
+            tokens.sort()
+        return tuple(tokens)
+
+    # Fallback: treat as a single token
+    return (str(marking),)
 
 
 class RawDataFrameLoader:
@@ -64,6 +155,7 @@ class RawDataFrameLoader:
             self.df[self.timestamp_name], format=date_format, errors="coerce"
         )
 
+
     @staticmethod
     def __extract_static_value(series: pd.Series) -> object:
         """
@@ -82,6 +174,7 @@ class RawDataFrameLoader:
         """
         Create a case-level dataframe from the event-level dataframe.
         """
+        event_level_df = _ensure_group_key_column(event_level_df, self.case_name)
         grouped = event_level_df.groupby(self.case_name, sort=False)
         records = []
         for case_id, group in grouped:
@@ -107,7 +200,7 @@ class CSV2EventLog(RawDataFrameLoader):
     """
     Base class for loading event logs from CSV files.
     """
-
+    
     def __init__(self, *args, **kwargs):
         """
         Initialize the event log loader with additional processing.
@@ -132,21 +225,25 @@ class CSV2EventLog(RawDataFrameLoader):
         if self.seconds_in_day_column:
             self.__create_seconds_in_day_column()
 
-        # raw dataframe befor split containing categorical and continuous attributes:
+        # raw dataframe before split containing categorical and continuous attributes:
         # Reduced to only the selected attributes
         self.raw_df = self.create_case_level_dataframe(self.df.copy())
 
-        self.df = (
-            self.df.groupby(self.case_name, group_keys=False)
-            .apply(lambda group: self.__add_last_rows(group))
-            .reset_index(drop=True)
+        applied = _groupby_apply_preserve_key(
+            self.df,
+            self.case_name,
+            lambda group: self.__add_last_rows(group),
+            sort=False,
         )
+        self.df = applied.reset_index(drop=True)
 
-        for categorical_col in self.categorical_columns:
-            self.df[categorical_col] = self.df[categorical_col].apply(
-                lambda x: x if pd.isna(x) else str(x)
-            )
-            self.df[categorical_col] = self.df[categorical_col].astype(object)
+        # Normalize categorical columns (dynamic + static) so integer-coded
+        # categories stay stable (avoid "1.0" artifacts).
+        for categorical_col in (self.categorical_columns + self.static_categorical_columns):
+            if categorical_col in self.df.columns:
+                self.df[categorical_col] = _normalize_categorical_series(
+                    self.df[categorical_col]
+                )
 
         for continuous_col in self.continuous_columns:
             self.df[continuous_col] = self.df[continuous_col].astype("float32")
@@ -191,11 +288,11 @@ class CSV2EventLog(RawDataFrameLoader):
             timestamp_name=self.timestamp_name,
             new_column_name=self.time_since_last_event_column,
         )
-        self.df = (
-            self.df.groupby(self.case_name)
-            .apply(min_timestamp_before)
-            .reset_index(drop=True)
+        applied = _groupby_apply_preserve_key(
+            self.df, self.case_name, min_timestamp_before, sort=False
         )
+        self.df = applied.reset_index(drop=True)
+
         self.df[self.time_since_last_event_column] = (
             self.df[self.timestamp_name] - self.df[self.time_since_last_event_column]
         ).dt.total_seconds()
@@ -229,6 +326,12 @@ class CSV2EventLog(RawDataFrameLoader):
         for col in group.columns:
             if col == self.case_name:
                 new_row[col] = group.name
+            elif col in self.categorical_columns:
+                new_row[col] = "EOS"
+            elif col in self.static_categorical_columns:
+                # Static categoricals should not receive EOS; keep them missing on
+                # the appended rows so per-case extraction uses the original value.
+                new_row[col] = np.nan
             elif group[col].dtype == "object" or group[col].dtype.name == "category":
                 new_row[col] = "EOS"
 
@@ -259,7 +362,9 @@ class EventLogSplitter:
         """
         Split the event log into train, train_validation, and test_validation sets.
         """
-        cases = event_log.df[event_log.case_name].unique()
+        # Ensure we shuffle a plain NumPy array (not a pandas StringArray),
+        # otherwise NumPy warns that shuffle may behave unexpectedly.
+        cases = np.asarray(event_log.df[event_log.case_name].unique(), dtype=object)
         np.random.shuffle(cases)
 
         train_validation_ix = int(self.train_validation_size * len(cases))
@@ -357,7 +462,8 @@ class TensorEncoderDecoder:
         if window_size == "auto":
             # get max. length of (100-1.5)% of the longest cases as prefix
             # and add the min. suffix_size
-            case_sizes = self.event_log.groupby(case_name).size()
+            event_log_df = _ensure_group_key_column(self.event_log, case_name)
+            case_sizes = event_log_df.groupby(case_name).size()
             self.window_size = (
                 round(case_sizes.quantile(1 - 0.015)) + self.min_suffix_size
             )
@@ -597,6 +703,7 @@ class TensorEncoderDecoder:
         """
         Encode a single categorical column into a tensor.
         """
+        df = _ensure_group_key_column(df, self.case_name)
         grouped = df.groupby(self.case_name)
         windows = []
         eos_masks = []
@@ -671,6 +778,7 @@ class TensorEncoderDecoder:
         """
         Encode a single continuous column into a tensor.
         """
+        df = _ensure_group_key_column(df, self.case_name)
         grouped = df.groupby(self.case_name)
         windows = []
         for _case_id, group in tqdm(grouped, desc=col, leave=False):
@@ -777,6 +885,7 @@ class TensorEncoderDecoder:
     def _collect_static_case_values(
         self, df: pd.DataFrame
     ) -> dict[str, dict[str, object]]:
+        df = _ensure_group_key_column(df, self.case_name)
         grouped = df.groupby(self.case_name, sort=False)
         case_values: dict[str, dict[str, object]] = {}
         for case_id, group in grouped:
@@ -951,7 +1060,8 @@ class PrefixesDataFrameLoader:
             self.window_size_setting if self.window_size_setting is not None else "auto"
         )
         if isinstance(setting, str) and setting.lower() == "auto":
-            case_sizes = self.event_log.groupby(self.case_name).size()
+            event_log_df = _ensure_group_key_column(self.event_log, self.case_name)
+            case_sizes = event_log_df.groupby(self.case_name).size()
             if case_sizes.empty:
                 return self.min_suffix_size
             auto_window = round(case_sizes.quantile(1 - 0.015)) + self.min_suffix_size
@@ -981,6 +1091,7 @@ class PrefixesDataFrameLoader:
         Transform the event log into a dataframe of prefixes.
         """
         working_df = self.event_log if df is None else df
+        working_df = _ensure_group_key_column(working_df, self.case_name)
         rows = []
         grouped = working_df.groupby(self.case_name, sort=False)
         for case_id, group in grouped:
@@ -1088,6 +1199,78 @@ class PrefixesDataFrameLoader:
                 ranges_info[col] = {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0}
         return {"categorical": categories_info, "continuous": ranges_info}
 
+    def remove_prefixes_with_unique_markings(
+        self,
+        train_pref_df: pd.DataFrame,
+        val_pref_df: pd.DataFrame,
+        test_pref_df: pd.DataFrame,
+        markings_train: list,
+        markings_val: list,
+        markings_test: list,
+        *,
+        sort_tokens: bool = True,
+    ):
+        """Remove prefixes whose marking is unique to one split.
+
+        A marking is considered "unique" for a split if its signature appears
+        in that split but in neither of the other two. All prefixes with such
+        markings are removed from that split.
+
+        Returns filtered (train/val/test) prefix DFs, filtered markings lists,
+        and the kept row indices (positional indices) per split.
+        """
+
+        def _validate_lengths(df: pd.DataFrame, markings: list, name: str) -> None:
+            if len(df) != len(markings):
+                raise ValueError(
+                    f"Length mismatch for {name}: prefix_df has {len(df)} rows, "
+                    f"markings has {len(markings)} entries"
+                )
+
+        _validate_lengths(train_pref_df, markings_train, "train")
+        _validate_lengths(val_pref_df, markings_val, "val")
+        _validate_lengths(test_pref_df, markings_test, "test")
+
+        train_sigs = [
+            _marking_signature(m, sort_tokens=sort_tokens) for m in list(markings_train)
+        ]
+        val_sigs = [
+            _marking_signature(m, sort_tokens=sort_tokens) for m in list(markings_val)
+        ]
+        test_sigs = [
+            _marking_signature(m, sort_tokens=sort_tokens) for m in list(markings_test)
+        ]
+
+        train_set = set(train_sigs)
+        val_set = set(val_sigs)
+        test_set = set(test_sigs)
+
+        unique_train = train_set - (val_set | test_set)
+        unique_val = val_set - (train_set | test_set)
+        unique_test = test_set - (train_set | val_set)
+
+        keep_train_ix = [i for i, s in enumerate(train_sigs) if s not in unique_train]
+        keep_val_ix = [i for i, s in enumerate(val_sigs) if s not in unique_val]
+        keep_test_ix = [i for i, s in enumerate(test_sigs) if s not in unique_test]
+
+        filtered_train_df = train_pref_df.iloc[keep_train_ix].reset_index(drop=True)
+        filtered_val_df = val_pref_df.iloc[keep_val_ix].reset_index(drop=True)
+        filtered_test_df = test_pref_df.iloc[keep_test_ix].reset_index(drop=True)
+
+        filtered_markings_train = [list(markings_train)[i] for i in keep_train_ix]
+        filtered_markings_val = [list(markings_val)[i] for i in keep_val_ix]
+        filtered_markings_test = [list(markings_test)[i] for i in keep_test_ix]
+
+        return (
+            filtered_train_df,
+            filtered_val_df,
+            filtered_test_df,
+            filtered_markings_train,
+            filtered_markings_val,
+            filtered_markings_test,
+            (keep_train_ix, keep_val_ix, keep_test_ix),
+        )
+
 
 class EventLogDataset(Dataset):
     """
@@ -1166,6 +1349,34 @@ class EventLogDataset(Dataset):
             static_cont,
             prefixes_petri_net_marking,
         )
+
+    def subset(self, indices: Iterable[int]) -> "EventLogDataset":
+        """Return a new dataset containing only the specified prefix rows."""
+        idx = list(indices)
+        if len(idx) == 0:
+            # Keep structure but return empty tensors
+            idx_tensor = torch.tensor([], dtype=torch.long)
+        else:
+            idx_tensor = torch.tensor(idx, dtype=torch.long)
+
+        new_tensor_bundle = {
+            "categorical": [t.index_select(0, idx_tensor) for t in self.categorical_tensors],
+            "continuous": [t.index_select(0, idx_tensor) for t in self.continuous_tensors],
+            "eos_padding": self.eos_padding.index_select(0, idx_tensor),
+            "zero_padding": self.zero_padding.index_select(0, idx_tensor),
+            "case_ids": tuple(self.case_ids[i] for i in idx),
+            "static_categorical": self.static_categorical_tensor.index_select(0, idx_tensor),
+            "static_continuous": self.static_continuous_tensor.index_select(0, idx_tensor),
+        }
+
+        new_ds = EventLogDataset(
+            new_tensor_bundle,
+            self.all_categories,
+            self.all_static_categories,
+            self.encoder_decoder,
+        )
+        new_ds.prefixes_petri_net_marking = [self.prefixes_petri_net_marking[i] for i in idx]
+        return new_ds
 
     def set_prefix_markings(
         self, markings, indices: Optional[Iterable[int]] = None
