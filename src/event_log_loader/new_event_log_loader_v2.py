@@ -4,12 +4,14 @@
 """
 from functools import partial
 from typing import Any, Dict, Iterable, Optional
+import warnings
 
 import numpy as np
 import pandas as pd
 import sklearn
 import sklearn.preprocessing
 import torch
+from pandas.errors import PerformanceWarning
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer
 from torch.utils.data import Dataset
@@ -283,19 +285,56 @@ class CSV2EventLog(RawDataFrameLoader):
         """
         Create a new column representing the time since the last event.
         """
-        min_timestamp_before = partial(
-            CSV2EventLog.__min_timestamp_before_event,
-            timestamp_name=self.timestamp_name,
-            new_column_name=self.time_since_last_event_column,
-        )
-        applied = _groupby_apply_preserve_key(
-            self.df, self.case_name, min_timestamp_before, sort=False
-        )
-        self.df = applied.reset_index(drop=True)
+        # Vectorized and dtype-stable implementation.
+        # The old implementation used `np.nan` for missing previous timestamps,
+        # which can upcast the column to object dtype and break datetime
+        # subtraction (pandas then raises the non-vectorized dtype mismatch
+        # error you saw).
+        df = _ensure_group_key_column(self.df, self.case_name)
 
-        self.df[self.time_since_last_event_column] = (
-            self.df[self.timestamp_name] - self.df[self.time_since_last_event_column]
-        ).dt.total_seconds()
+        # Keep original row order, but compute within-case diffs in time order.
+        work = df.copy()
+        work["_orig_row"] = np.arange(len(work))
+        work = work.sort_values(
+            [self.case_name, self.timestamp_name], kind="mergesort"
+        )
+
+        # Ensure timestamps are datetime-like before shifting/subtracting.
+        # RawDataFrameLoader already parses this, but groupby/apply pipelines or
+        # mixed inputs may still result in object dtype.
+        work[self.timestamp_name] = pd.to_datetime(
+            work[self.timestamp_name], errors="coerce"
+        )
+
+        # Match old semantics: previous strictly earlier timestamp within the
+        # same case (not just the previous row). This matters when a case has
+        # multiple events with identical timestamps.
+        grouped = work.groupby(self.case_name, sort=False)[self.timestamp_name]
+
+        # Identify blocks of equal timestamps per case (after sorting).
+        prev_row_ts = grouped.shift(1)
+        is_new_timestamp = work[self.timestamp_name].ne(prev_row_ts)
+        ts_block = is_new_timestamp.astype(int).groupby(work[self.case_name], sort=False).cumsum()
+
+        # For each (case, timestamp-block), get the block timestamp and the
+        # previous block timestamp (strictly earlier by construction).
+        block_ts = work.groupby([work[self.case_name], ts_block], sort=False)[
+            self.timestamp_name
+        ].first()
+        prev_block_ts = block_ts.groupby(level=0, sort=False).shift(1)
+
+        # Broadcast previous block timestamp back to each row.
+        row_index = pd.MultiIndex.from_arrays([work[self.case_name], ts_block])
+        prev_strict_ts = prev_block_ts.reindex(row_index).to_numpy()
+
+        delta = work[self.timestamp_name] - prev_strict_ts
+        # Keep the first (minimum-timestamp) events per case as NaN.
+        work[self.time_since_last_event_column] = delta.dt.total_seconds()
+
+        work = work.sort_values("_orig_row", kind="mergesort").drop(
+            columns=["_orig_row"]
+        )
+        self.df = work
 
     def __create_day_in_week_column(self):
         """
