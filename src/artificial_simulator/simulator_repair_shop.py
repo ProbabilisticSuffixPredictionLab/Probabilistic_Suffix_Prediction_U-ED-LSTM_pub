@@ -540,10 +540,7 @@ if __name__ == '__main__':
         5 : [0]*24,
         6 : [0]*24
     }
-
-
     '''
-
 
     #simulator = ProcessSimulator(logger=CSVLogger('test_log.csv'))
     simulator = ProcessSimulator(logger=CSVLogger('repair_shop_event_log.csv'))
